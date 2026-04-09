@@ -1,0 +1,234 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --fitrem-font-family: "Avenir Next", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --fitrem-title-font-family: "Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+body,
+#app {
+  font-family: var(--fitrem-font-family);
+}
+
+:where([class*='uppercase'][class*='tracking-widest']) {
+  font-family: var(--fitrem-title-font-family) !important;
+  font-weight: 650 !important;
+  letter-spacing: 0.025em !important;
+  text-transform: none !important;
+}
+
+/* UI Style Redesign - Modern Fintech Premium Look */
+
+/* Card Global Overrides (去线框化与高级阴影) */
+.ant-card {
+  border: none !important;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.03), 0 4px 6px -4px rgba(0, 0, 0, 0.02) !important;
+}
+
+.ant-card-bordered {
+  border: none !important;
+}
+
+/* Primary Button Global Overrides (微渐变效果与色彩克制) */
+.ant-btn-primary {
+  background: linear-gradient(135deg, #0284c7, #38bdf8) !important;
+  border: none !important;
+  transition: all 0.3s ease !important;
+}
+
+.ant-btn-primary:not(:disabled):hover {
+  background: linear-gradient(135deg, #0284c7, #38bdf8) !important;
+  box-shadow: 0 4px 14px 0 rgba(2, 132, 199, 0.45) !important;
+  transform: translateY(-1px) !important;
+}
+
+.ant-btn-primary:not(:disabled):active {
+  transform: translateY(0) !important;
+  box-shadow: 0 2px 8px 0 rgba(2, 132, 199, 0.35) !important;
+}
+
+/* Tag Global Overrides (状态标签的呼吸感) */
+.ant-tag {
+  border: none !important;
+  border-radius: 999px !important;
+  padding: 2px 12px !important;
+  font-weight: 500;
+}
+
+/* Card & Table Row Hover States (卡片 Hover 态升起感) */
+.ant-card {
+  transition: transform 0.3s ease, box-shadow 0.3s ease !important;
+}
+
+.ant-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.03) !important;
+}
+
+/* 轻量的数据行悬浮感 */
+.ant-table-tbody > tr.ant-table-row:hover > td {
+  background: #f8fafc !important;
+}
+
+/* Phase 3: Advanced Visuals & Layout */
+
+/* 1. 环境光映射 (Ambient Glow Focus) */
+.ant-layout {
+  background-image: radial-gradient(circle at 50% 0%, rgba(2, 132, 199, 0.04) 0%, rgba(2, 132, 199, 0) 60%) !important;
+  background-color: #f8fafc !important; /* fallback to cool gray */
+}
+
+/* 2. 入场微动效 (Staggered Animation) */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ant-card, .ant-table-wrapper {
+  animation: fadeInUp 0.4s ease-out forwards;
+}
+
+/* 3. 高级排版 (Typography Spacing) */
+.ant-typography {
+  letter-spacing: -0.01em !important;
+}
+
+h1.ant-typography, h2.ant-typography, h3.ant-typography, h4.ant-typography {
+  letter-spacing: -0.02em !important;
+}
+
+/* Phase 4: Mobile Responsive Adaptation */
+
+/* Prevent iOS Safari auto-zoom on inputs by ensuring font-size is at least 16px */
+@media screen and (max-width: 768px) {
+  .ant-input, 
+  .ant-select-selection-search-input,
+  .ant-select-selection-item,
+  .ant-input-number-input {
+    font-size: 16px !important;
+  }
+}
+
+/* Global Mobile Layout Padding Protection */
+@media screen and (max-width: 768px) {
+  .ant-layout-header {
+    padding: 12px 16px !important; 
+    height: auto !important;
+    min-height: 64px;
+  }
+  .container.mx-auto {
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+  }
+  .ant-card-body {
+    padding: 16px !important;
+  }
+  .ant-card {
+    border-radius: 12px !important;
+  }
+}
+
+/* Custom override for disabled Tech Status select to prevent gray-out */
+.tech-status-select-disabled.ant-select-disabled .ant-select-selection-item {
+  color: inherit !important;
+  -webkit-text-fill-color: inherit !important;
+  opacity: 1 !important;
+}
+.tech-status-select-disabled.ant-select-disabled .ant-select-arrow {
+  color: inherit !important;
+  opacity: 0.8 !important;
+}
+
+/* Force sticky context for App layout */
+.ant-layout, .ant-layout-content {
+  overflow: visible !important;
+  clip-path: none !important;
+}
+
+.pricing-payment-method-table .ant-table-thead > tr > th {
+  background: #f8fbff !important;
+  border-bottom: 1px solid #e2e8f0 !important;
+  padding-top: 14px !important;
+  padding-bottom: 14px !important;
+}
+
+.pricing-payment-method-table .ant-table-tbody > tr > td {
+  border-bottom: 1px solid #edf2f7 !important;
+  padding-top: 18px !important;
+  padding-bottom: 18px !important;
+  vertical-align: top;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.pricing-payment-method-table .ant-table-tbody > tr:hover > td {
+  background: #f8fbff !important;
+}
+
+.pricing-payment-method-table .ant-table-tbody > tr.pricing-payment-method-table-row-active > td {
+  background: #f0f7ff !important;
+}
+
+.pricing-payment-method-table .ant-table-cell-fix-left,
+.pricing-payment-method-table .ant-table-cell-fix-right {
+  background: inherit !important;
+}
+
+.dashboard-pricing-matrix-table .ant-table-thead > tr > th {
+  background: #f8fbff !important;
+  border-bottom: 1px solid #e2e8f0 !important;
+  padding-top: 14px !important;
+  padding-bottom: 14px !important;
+}
+
+.dashboard-pricing-matrix-table .ant-table-tbody > tr > td {
+  border-bottom: 1px solid #edf2f7 !important;
+  padding-top: 18px !important;
+  padding-bottom: 18px !important;
+  vertical-align: top;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.dashboard-pricing-matrix-table .ant-table-tbody > tr:hover > td {
+  background: #f8fbff !important;
+}
+
+.dashboard-pricing-matrix-table .ant-table-thead > tr > .ant-table-cell-fix-left,
+.dashboard-pricing-matrix-table .ant-table-thead > tr > .ant-table-cell-fix-right {
+  background: #f8fbff !important;
+}
+
+.dashboard-pricing-matrix-table .ant-table-tbody > tr > .ant-table-cell-fix-left,
+.dashboard-pricing-matrix-table .ant-table-tbody > tr > .ant-table-cell-fix-right {
+  background: #ffffff !important;
+}
+
+.dashboard-pricing-matrix-table .ant-table-tbody > tr:hover > .ant-table-cell-fix-left,
+.dashboard-pricing-matrix-table .ant-table-tbody > tr:hover > .ant-table-cell-fix-right {
+  background: #f8fbff !important;
+}
+
+.dashboard-pricing-matrix-table .ant-table-cell-fix-left-first::after,
+.dashboard-pricing-matrix-table .ant-table-cell-fix-left-last::after,
+.dashboard-pricing-matrix-table .ant-table-cell-fix-right-first::after,
+.dashboard-pricing-matrix-table .ant-table-cell-fix-right-last::after {
+  box-shadow: none !important;
+  background: transparent !important;
+}
+
+.dashboard-pricing-matrix-table .ant-table-thead > tr > .ant-table-cell-fix-left-last,
+.dashboard-pricing-matrix-table .ant-table-tbody > tr > .ant-table-cell-fix-left-last {
+  border-right: 1px solid #e2e8f0 !important;
+}
+
+.dashboard-pricing-matrix-table .ant-table-ping-left:not(.ant-table-has-fix-left) .ant-table-cell-fix-left-last,
+.dashboard-pricing-matrix-table .ant-table-ping-left .ant-table-cell-fix-left-last {
+  border-right: 1px solid #e2e8f0 !important;
+}
