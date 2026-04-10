@@ -20,6 +20,7 @@ import {
   PRICING_RULE_CARD_SYSTEM_CATALOG,
   PRICING_RULE_CARD_SYSTEM_IDS,
 } from '../constants/initialData';
+import { getWorkflowStatusTheme, normalizeWorkflowStatusLabel } from '../utils/workflowStatus';
 
 const store = useAppStore();
 const emit = defineEmits(['registerToolbar']);
@@ -68,12 +69,23 @@ const proposals = computed(() => sortProposalsByTimestamp(
     String(proposal?.mode ?? '').trim().toLowerCase() === activeCooperationMode.value.trim().toLowerCase()
   )),
 ));
+const pricingStatusLabel = computed(() => normalizeWorkflowStatusLabel(
+  channel.value.pricingProposalStatus || channel.value.globalProgress?.pricing,
+));
+const pricingStatusTheme = computed(() => getWorkflowStatusTheme(pricingStatusLabel.value));
 const selectedProposal = computed(() =>
   proposals.value.find((proposal: any) => proposal.id === (selectedProposalId.value || activeProposalId.value))
 );
 const activeProposal = computed(() =>
   proposals.value.find((proposal: any) => proposal.id === activeProposalId.value)
 );
+const submissionTargetProposal = computed(() => (
+  selectedProposal.value
+  || activeProposal.value
+  || proposals.value[0]
+  || sortProposalsByTimestamp(rawPricingProposals.value)[0]
+  || null
+));
 const getProposalById = (proposalId?: string | null) => (
   rawPricingProposals.value.find((proposal: any) => proposal.id === proposalId)
 );
@@ -229,6 +241,40 @@ const formatProposalTimestamp = (timestamp?: string) => {
   const parsed = dayjs(timestamp);
   return parsed.isValid() ? parsed.format(timestampFormat) : timestamp;
 };
+const resolveTimestampValue = (timestamp?: string) => {
+  const parsed = dayjs(timestamp);
+  return parsed.isValid() ? parsed.valueOf() : 0;
+};
+const getApprovalHistoryEntryTitle = (type?: string) => {
+  if (type === 'approve') return 'Approved';
+  if (type === 'request_changes') return 'Request Changes';
+  return 'Submitted';
+};
+const getApprovalHistoryEntryStatus = (type?: string) => {
+  if (type === 'approve') return 'Approved';
+  if (type === 'request_changes') return 'Changes Requested';
+  return 'In Review';
+};
+const currentHistoryProposal = computed(() => submissionTargetProposal.value);
+const currentHistoryProposalStatus = computed(() => normalizeWorkflowStatusLabel(
+  currentHistoryProposal.value?.approvalStatus || 'Not Started',
+));
+const pricingHistoryEntries = computed(() => {
+  const proposal = currentHistoryProposal.value;
+  if (!proposal) return [];
+
+  const history = Array.isArray(proposal.approvalHistory) ? proposal.approvalHistory : [];
+  return [...history]
+    .sort((left: any, right: any) => resolveTimestampValue(right.time) - resolveTimestampValue(left.time))
+    .map((entry: any, index: number) => ({
+      key: `${proposal.id}-${entry.type}-${entry.time}-${index}`,
+      title: getApprovalHistoryEntryTitle(entry.type),
+      status: getApprovalHistoryEntryStatus(entry.type),
+      time: entry.time,
+      actor: entry.user || 'Current User',
+      note: entry.note || '',
+    }));
+});
 const persistProposals = (nextProposals: any[]) => {
   store.updateChannel({
     ...channel.value,
@@ -273,6 +319,7 @@ const getProposalReferralRulePreview = (value?: string | null) => {
   return normalized.length > 140 ? `${normalized.slice(0, 137)}...` : normalized;
 };
 const isReferralProposal = (proposal?: any) => isReferralMode(proposal?.mode);
+const isProposalInReview = (proposal?: any) => normalizeWorkflowStatusLabel(proposal?.approvalStatus) === 'In Review';
 
 const formatFee = (rule: any) => {
   if (!rule) return 'Not set';
@@ -513,6 +560,7 @@ const createProposal = (options?: {
         approvalStatus: 'Not Started',
         updatedAt: getCurrentTimestamp(),
         paymentMethods: [],
+        approvalHistory: [],
       }
     : {
         id: `prop-${Date.now()}`,
@@ -524,7 +572,8 @@ const createProposal = (options?: {
         mode,
         approvalStatus: 'Not Started',
         updatedAt: getCurrentTimestamp(),
-        paymentMethods: []
+        paymentMethods: [],
+        approvalHistory: [],
       };
 
   persistProposals([...rawPricingProposals.value, newProposal]);
@@ -686,6 +735,7 @@ const handleDuplicateProposal = (id: string) => {
     specifiedVerticals: source.specifiedVerticals || (source.type === 'Other' ? source.customProposalType || '' : ''),
     approvalStatus: 'Not Started',
     updatedAt: getCurrentTimestamp(),
+    approvalHistory: [],
   };
   
   // Update IDs for payment methods to ensure uniqueness
@@ -802,6 +852,79 @@ const handleSavePricing = () => {
   message.success('Pricing configuration saved');
 };
 
+const handleSubmitPricingForReview = (proposalId?: string) => {
+  const proposal = proposalId ? syncActiveModeWithProposal(proposalId) : submissionTargetProposal.value;
+  if (!proposal) {
+    message.warning('Create or select a pricing schedule before submitting it for review.');
+    return;
+  }
+
+  if (isProposalInReview(proposal)) {
+    message.warning('This pricing schedule is already in review.');
+    return;
+  }
+
+  const updatedAt = getCurrentTimestamp();
+  const historyNote = proposal.remark || 'Pricing schedule submitted for review.';
+  const nextProposals = sortProposalsByTimestamp(
+    rawPricingProposals.value.map((currentProposal: any) => (
+      currentProposal.id === proposal.id
+        ? {
+            ...currentProposal,
+            approvalStatus: 'In Review',
+            updatedAt,
+            approvalHistory: [
+              ...(Array.isArray(currentProposal.approvalHistory) ? currentProposal.approvalHistory : []),
+              {
+                type: 'submit',
+                time: updatedAt,
+                user: 'Current User',
+                note: historyNote,
+              },
+            ],
+          }
+        : currentProposal
+    )),
+  );
+
+  activeProposalId.value = proposal.id;
+  if (currentView.value === 'methodList') {
+    selectedProposalId.value = proposal.id;
+  }
+
+  store.updateChannel({
+    ...channel.value,
+    lastModifiedAt: updatedAt,
+    pricingProposals: nextProposals,
+    pricingProposalStatus: 'In Review',
+    globalProgress: {
+      ...(channel.value.globalProgress || {}),
+      pricing: 'In Review',
+    },
+    submissionHistory: {
+      ...(channel.value.submissionHistory || {}),
+      pricing: {
+        date: updatedAt,
+        user: 'Current User',
+        notes: historyNote,
+        proposalId: proposal.id,
+        proposalName: proposal.customProposalType || 'Pricing Schedule',
+      },
+    },
+    auditLogs: [
+      {
+        time: updatedAt,
+        user: 'Current User',
+        action: `Submitted pricing schedule "${proposal.customProposalType || 'Pricing Schedule'}" for review.`,
+        color: 'blue',
+      },
+      ...(channel.value.auditLogs || []),
+    ],
+  });
+
+  message.success('Pricing schedule submitted for review.');
+};
+
 </script>
 
 <template>
@@ -827,7 +950,14 @@ const handleSavePricing = () => {
           </a-breadcrumb>
         </div>
 
-        <h2 class="text-[22px] font-black text-[#0f172a] m-0 leading-tight mb-1 tracking-tight">Pricing</h2>
+        <div class="mb-1 flex flex-wrap items-center gap-3">
+          <h2 class="m-0 text-[22px] font-black leading-tight tracking-tight text-[#0f172a]">Pricing</h2>
+          <a-tag
+            :style="{ backgroundColor: pricingStatusTheme.bg, color: pricingStatusTheme.text, border: 'none', borderRadius: '999px', fontWeight: 800, padding: '4px 12px' }"
+          >
+            {{ pricingStatusLabel }}
+          </a-tag>
+        </div>
         <p class="text-slate-500 text-[13px] m-0 max-w-2xl font-medium mb-4 leading-relaxed">
           Manage pricing schedules and drill down into payment methods through a linked workflow.
         </p>
@@ -852,19 +982,27 @@ const handleSavePricing = () => {
       </a-card>
 
       <!-- List Section Header -->
-      <div class="flex justify-between items-center mb-6 px-2">
+      <div class="mb-6 flex items-center justify-between px-2">
         <div class="flex items-center gap-3">
           <h3 class="text-[18px] font-black text-slate-900 m-0">Pricing schedule list</h3>
           <span class="text-[13px] text-slate-400 font-medium">Last updated: {{ channel.lastModifiedAt || '2026-03-31 16:02:02' }}</span>
         </div>
-        <a-button 
-          type="primary" 
-          @click="openAddProposalModal"
-          class="h-[40px] px-6 rounded-xl font-black flex items-center gap-2 bg-[#0284c7] border-none shadow-md"
-        >
-          <template #icon><plus-outlined /></template>
-          Create Pricing Schedule
-        </a-button>
+        <div class="flex items-center gap-3">
+          <a-button
+            @click="handleSubmitPricingForReview"
+            class="h-[40px] rounded-xl border-slate-200 px-5 font-black text-slate-700"
+          >
+            Submit for Review
+          </a-button>
+          <a-button 
+            type="primary" 
+            @click="openAddProposalModal"
+            class="flex h-[40px] items-center gap-2 rounded-xl border-none bg-[#0284c7] px-6 font-black shadow-md"
+          >
+            <template #icon><plus-outlined /></template>
+            Create Pricing Schedule
+          </a-button>
+        </div>
       </div>
 
       <!-- Pricing Schedule List -->
@@ -904,7 +1042,7 @@ const handleSavePricing = () => {
                     <a-button size="small" class="rounded-lg font-bold text-sky-600 border border-sky-100 px-3 h-[28px] text-[11px] bg-sky-50/50">More actions</a-button>
                     <template #overlay>
                       <a-menu>
-                        <a-menu-item key="enable">Enable</a-menu-item>
+                        <a-menu-item key="submit" :disabled="isProposalInReview(proposal)" @click="handleSubmitPricingForReview(proposal.id)">Submit</a-menu-item>
                         <a-menu-item key="rename" @click="openRenameProposalModal(proposal)">Rename schedule</a-menu-item>
                         <a-menu-item key="export" @click="handleExportProposal(proposal.id)">Export CSV</a-menu-item>
                         <a-menu-divider />
@@ -995,7 +1133,14 @@ const handleSavePricing = () => {
                   <a-breadcrumb-item class="text-slate-600 font-medium text-[13px]">{{ selectedProposal.customProposalType || 'Pricing Schedule' }}</a-breadcrumb-item>
                 </a-breadcrumb>
               </div>
-              <h2 class="text-[24px] font-black text-[#0f172a] m-0 leading-tight mb-1 tracking-tight">{{ selectedProposal.customProposalType || 'Pricing Schedule' }}</h2>
+              <div class="mb-1 flex flex-wrap items-center gap-3">
+                <h2 class="m-0 text-[24px] font-black leading-tight tracking-tight text-[#0f172a]">{{ selectedProposal.customProposalType || 'Pricing Schedule' }}</h2>
+                <a-tag
+                  :style="{ backgroundColor: pricingStatusTheme.bg, color: pricingStatusTheme.text, border: 'none', borderRadius: '999px', fontWeight: 800, padding: '4px 12px' }"
+                >
+                  {{ pricingStatusLabel }}
+                </a-tag>
+              </div>
               <p class="text-slate-400 text-[13px] m-0 max-w-2xl font-medium">
                 Review this pricing schedule, update the basic information here, and manage the payment methods below.
               </p>
@@ -1003,6 +1148,9 @@ const handleSavePricing = () => {
             <div class="flex items-center gap-2">
               <a-button @click="handleExportProposal(selectedProposal.id)" class="h-[36px] px-4 rounded-xl font-bold text-slate-600 bg-white border border-slate-200 flex items-center gap-2">
                 <template #icon><export-outlined /></template>Export
+              </a-button>
+              <a-button @click="handleSubmitPricingForReview" class="h-[36px] rounded-xl border-slate-200 px-4 font-black text-slate-700">
+                Submit for Review
               </a-button>
               <a-button @click="currentView = 'list'" class="h-[36px] px-4 rounded-xl font-bold text-slate-400 bg-slate-50 border-none">Discard</a-button>
               <a-button type="primary" @click="handleSavePricing" class="h-[36px] px-6 rounded-xl font-black bg-[#0284c7] border-none shadow-md">Save</a-button>
@@ -1359,6 +1507,16 @@ const handleSavePricing = () => {
             <a-breadcrumb-item class="text-slate-900 font-bold text-[13px]">Configure Payment Method</a-breadcrumb-item>
           </a-breadcrumb>
         </div>
+        <div class="mb-5 flex flex-wrap items-center gap-3">
+          <h2 class="m-0 text-[24px] font-black leading-tight tracking-tight text-[#0f172a]">
+            {{ selectedProposal?.customProposalType || 'Pricing Schedule' }}
+          </h2>
+          <a-tag
+            :style="{ backgroundColor: pricingStatusTheme.bg, color: pricingStatusTheme.text, border: 'none', borderRadius: '999px', fontWeight: 800, padding: '4px 12px' }"
+          >
+            {{ pricingStatusLabel }}
+          </a-tag>
+        </div>
         <PaymentMethodDrawer
           :open="true"
           :initial-data="activePaymentMethod"
@@ -1367,6 +1525,65 @@ const handleSavePricing = () => {
           @save="onSaveMethod"
         />
       </div>
+
+      <section class="mt-6">
+        <a-card
+          class="rounded-[24px] border border-slate-200 bg-white shadow-[0_18px_42px_-30px_rgba(15,23,42,0.28)]"
+          :body-style="{ padding: '24px' }"
+        >
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <div class="text-[12px] font-black uppercase tracking-[0.18em] text-slate-400">Shared History</div>
+              <h3 class="mt-2 mb-0 text-[22px] font-black text-slate-950">{{ currentHistoryProposal?.customProposalType || 'Pricing Schedule' }}</h3>
+              <p class="mt-2 mb-0 text-[13px] font-medium leading-relaxed text-slate-500">
+                Only submission and approval actions are recorded here for the current pricing schedule.
+              </p>
+            </div>
+            <a-tag
+              :style="{ backgroundColor: getWorkflowStatusTheme(currentHistoryProposalStatus).bg, color: getWorkflowStatusTheme(currentHistoryProposalStatus).text, border: 'none', borderRadius: '999px', fontWeight: 800, padding: '4px 12px' }"
+            >
+              {{ currentHistoryProposalStatus }}
+            </a-tag>
+          </div>
+
+          <div v-if="pricingHistoryEntries.length" class="mt-5 space-y-4">
+            <div
+              v-for="entry in pricingHistoryEntries"
+              :key="entry.key"
+              class="rounded-[20px] border border-slate-200 bg-slate-50/70 p-5"
+            >
+              <div class="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div class="text-[13px] font-black text-slate-900">{{ entry.title }}</div>
+                </div>
+                <a-tag
+                  :style="{ backgroundColor: getWorkflowStatusTheme(entry.status).bg, color: getWorkflowStatusTheme(entry.status).text, border: 'none', borderRadius: '999px', fontWeight: 800, padding: '4px 12px' }"
+                >
+                  {{ normalizeWorkflowStatusLabel(entry.status) }}
+                </a-tag>
+              </div>
+
+              <div class="mt-4 grid gap-4 md:grid-cols-2">
+                <div>
+                  <div class="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">Updated At</div>
+                  <div class="mt-2 text-[13px] font-semibold text-slate-700">{{ entry.time }}</div>
+                </div>
+                <div>
+                  <div class="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">Actor</div>
+                  <div class="mt-2 text-[13px] font-semibold text-slate-700">{{ entry.actor }}</div>
+                </div>
+                <div class="md:col-span-2">
+                  <div class="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">Notes</div>
+                  <div class="mt-2 text-[13px] font-semibold leading-relaxed text-slate-700">
+                    {{ entry.note || 'No notes recorded for this update.' }}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <a-empty v-else class="mt-5" description="No pricing schedule history yet." />
+        </a-card>
+      </section>
     </div>
 
     <!-- 辅助弹窗 -->

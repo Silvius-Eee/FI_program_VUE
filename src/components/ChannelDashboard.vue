@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, h, reactive, watch } from 'vue';
 import { useAppStore } from '../stores/app';
-import { 
+import {
   INITIAL_CORRIDOR_VIEWS, 
   INITIAL_MATRIX_VIEWS,
   cloneDashboardFieldSchema,
@@ -17,6 +17,14 @@ import {
 } from '../constants/initialData';
 import { getOnboardingStatusTheme } from '../constants/onboarding';
 import { supportedProductOptions } from '../constants/channelOptions';
+import {
+  getMsaStatusTheme,
+  getNdaStatusTheme,
+  getWorkflowStatusTheme,
+  normalizeMsaStatusLabel,
+  normalizeNdaStatusLabel,
+  normalizeWorkflowStatusLabel,
+} from '../utils/workflowStatus';
 import {
   AppstoreOutlined,
   CloseOutlined,
@@ -37,6 +45,18 @@ import {
 import { message, Modal } from 'ant-design-vue';
 import dayjs from 'dayjs';
 
+const resolveLegalStatusLabel = (fieldKey: string, value: unknown) => {
+  if (fieldKey === 'ndaStatus') return normalizeNdaStatusLabel(value);
+  if (fieldKey === 'contractStatus') return normalizeMsaStatusLabel(value);
+  return normalizeWorkflowStatusLabel(value);
+};
+
+const resolveLegalStatusTheme = (fieldKey: string, value: unknown) => {
+  if (fieldKey === 'ndaStatus') return getNdaStatusTheme(value);
+  if (fieldKey === 'contractStatus') return getMsaStatusTheme(value);
+  return getWorkflowStatusTheme(value);
+};
+
 const dashboardFilterOperatorValues = ['equals', 'notEquals', 'contains', 'notContains', 'isEmpty', 'isNotEmpty'] as const;
 type DashboardFilterOperator = typeof dashboardFilterOperatorValues[number];
 
@@ -48,8 +68,7 @@ const dashboardFilterFieldKeys = [
   'merchantGeo',
   'settlementCurrency',
   'paymentMethod',
-  'wooshpayOnboardingStatus',
-  'corridorOnboardingStatus',
+  'complianceStatus',
   'ndaStatus',
   'contractStatus',
   'pricingProposalStatus',
@@ -275,22 +294,6 @@ const statusColors: any = {
   'Lost connection': { bg: '#F1F5F9', text: '#475569' },
 };
 
-const workflowStatusColors: Record<string, { bg: string; text: string }> = {
-  Completed: { bg: '#DCFCE7', text: '#166534' },
-  Signed: { bg: '#DCFCE7', text: '#166534' },
-  Approved: { bg: '#DBEAFE', text: '#1D4ED8' },
-  'In Review': { bg: '#E0E7FF', text: '#4338CA' },
-  'Under Review': { bg: '#E0E7FF', text: '#4338CA' },
-  'In Progress': { bg: '#FEF3C7', text: '#B45309' },
-  'In process': { bg: '#FEF3C7', text: '#B45309' },
-  'Not Started': { bg: '#F1F5F9', text: '#475569' },
-  'No need': { bg: '#F8FAFC', text: '#64748B' },
-  'WooshPay Preparation': { bg: '#dbeafe', text: '#1d4ed8' },
-  'Corridor Preparation': { bg: '#dbeafe', text: '#1d4ed8' },
-  'Corridor Reviewing': { bg: '#fee2e2', text: '#dc2626' },
-  'WooshPay Reviewing': { bg: '#fee2e2', text: '#dc2626' },
-};
-
 const merchantGeoFilterOptions = flattenLeafOptions(merchantGeoOptions);
 const settlementCurrencyFilterOptions = flattenLeafOptions(settlementCurrencyCascaderOptions);
 const cooperationModeFilterOptions = buildUniqueOptions(['Referral', 'PayFac', 'MoR']);
@@ -298,8 +301,7 @@ const cooperationModeFilterOptions = buildUniqueOptions(['Referral', 'PayFac', '
 const corridorBaseColumnDefs = [
   { key: 'channelName', fixed: 'left', width: 220, sorter: (a: any, b: any) => a.channelName.localeCompare(b.channelName) },
   { key: 'status', width: 120 },
-  { key: 'wooshpayOnboardingStatus', width: 170 },
-  { key: 'corridorOnboardingStatus', width: 170 },
+  { key: 'complianceStatus', width: 170 },
   { key: 'ndaStatus', width: 120 },
   { key: 'contractStatus', width: 120 },
   { key: 'pricingProposalStatus', width: 120 },
@@ -330,8 +332,7 @@ const fieldFilterKeyMap: Partial<Record<string, DashboardFilterFieldKey[]>> = {
   settlementCurrency: ['settlementCurrency'],
   paymentMethodName: ['paymentMethod'],
   paymentMethods: ['paymentMethod'],
-  wooshpayOnboardingStatus: ['wooshpayOnboardingStatus'],
-  corridorOnboardingStatus: ['corridorOnboardingStatus'],
+  complianceStatus: ['complianceStatus'],
   ndaStatus: ['ndaStatus'],
   contractStatus: ['contractStatus'],
   pricingProposalStatus: ['pricingProposalStatus'],
@@ -577,21 +578,12 @@ const dashboardFilterFieldConfigs = computed<DashboardFilterFieldConfig[]>(() =>
     isEmpty: defaultFilterIsEmpty,
   },
   {
-    key: 'wooshpayOnboardingStatus',
-    label: getFilterFieldLabel('wooshpayOnboardingStatus', 'WooshPay onboarding'),
+    key: 'complianceStatus',
+    label: getFilterFieldLabel('complianceStatus', 'Compliance'),
     controlType: 'select',
-    options: buildUniqueOptions(store.channelList.map((item) => item.wooshpayOnboardingStatus)),
+    options: buildUniqueOptions(store.channelList.map((item) => item.complianceStatus)),
     valuePlaceholder: 'Select status',
-    getValue: (item) => item.wooshpayOnboardingStatus ? [String(item.wooshpayOnboardingStatus)] : [],
-    isEmpty: defaultFilterIsEmpty,
-  },
-  {
-    key: 'corridorOnboardingStatus',
-    label: getFilterFieldLabel('corridorOnboardingStatus', 'Corridor onboarding'),
-    controlType: 'select',
-    options: buildUniqueOptions(store.channelList.map((item) => item.corridorOnboardingStatus)),
-    valuePlaceholder: 'Select status',
-    getValue: (item) => item.corridorOnboardingStatus ? [String(item.corridorOnboardingStatus)] : [],
+    getValue: (item) => item.complianceStatus ? [String(item.complianceStatus)] : [],
     isEmpty: defaultFilterIsEmpty,
   },
   {
@@ -1700,21 +1692,21 @@ const handleDeleteView = (id: string) => {
               </template>
 
               <!-- 瀹搞儰缍斿ù浣哄Ц閹礁鐣鹃敓?(KYC, NDA, Contract, Pricing, Tech) -->
-              <template v-else-if="['wooshpayOnboardingStatus', 'corridorOnboardingStatus', 'ndaStatus', 'contractStatus', 'pricingProposalStatus', 'techStatus'].includes(resolveColumnSourceKey(column))">
+              <template v-else-if="['complianceStatus', 'ndaStatus', 'contractStatus', 'pricingProposalStatus', 'techStatus'].includes(resolveColumnSourceKey(column))">
                 <a-tag v-if="text" :style="{
-                  backgroundColor: ['wooshpayOnboardingStatus', 'corridorOnboardingStatus'].includes(resolveColumnSourceKey(column))
+                  backgroundColor: resolveColumnSourceKey(column) === 'complianceStatus'
                     ? getOnboardingStatusTheme(text).bg
-                    : (workflowStatusColors[text]?.bg || '#F8FAFC'),
-                  color: ['wooshpayOnboardingStatus', 'corridorOnboardingStatus'].includes(resolveColumnSourceKey(column))
+                    : resolveLegalStatusTheme(resolveColumnSourceKey(column), text).bg,
+                  color: resolveColumnSourceKey(column) === 'complianceStatus'
                     ? getOnboardingStatusTheme(text).text
-                    : (workflowStatusColors[text]?.text || '#475569'),
+                    : resolveLegalStatusTheme(resolveColumnSourceKey(column), text).text,
                   border: 'none',
                   borderRadius: '999px',
                   fontWeight: 600,
                   fontSize: '11px',
                   padding: '2px 10px'
                 }">
-                  {{ text }}
+                  {{ resolveColumnSourceKey(column) === 'complianceStatus' ? text : resolveLegalStatusLabel(resolveColumnSourceKey(column), text) }}
                 </a-tag>
                 <span v-else class="text-slate-300">-</span>
               </template>

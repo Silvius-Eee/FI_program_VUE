@@ -1,311 +1,563 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { FileTextOutlined } from '@ant-design/icons-vue';
+import { useAppStore } from '../stores/app';
 import {
-  FileTextOutlined,
-  CheckCircleOutlined,
-  SendOutlined,
-  ArrowLeftOutlined,
-  CloseCircleOutlined,
-} from '@ant-design/icons-vue';
-import { message } from 'ant-design-vue';
-
-interface LegalTask {
-  id: number;
-  channelName: string;
-  docType: string;
-  status: string;
-  submittedBy: string;
-  date: string;
-}
+  getLatestLegalStatusEntry,
+  getLegalDocumentStatusTheme,
+  getLegalQueueGroup,
+  getLegalQueueSubStatusOptions,
+  type LegalDocType,
+  type LegalQueueGroup,
+  type LegalQueueSubStatus,
+} from '../utils/workflowStatus';
 
 const props = defineProps<{
   isStandalone?: boolean;
-  reviewType?: string;
-  channelData?: any;
 }>();
 
-const emit = defineEmits(['finishReview']);
+type LegalQueueRow = {
+  id: string;
+  channel: any;
+  corridorName: string;
+  fiOwner: string;
+  submittedAt: string;
+  latestNote: string;
+  status: string;
+  docType: LegalDocType;
+  group: LegalQueueGroup;
+};
 
-// --- Mock Data ---
-const pendingTasks: LegalTask[] = [
-  { id: 101, channelName: 'Stripe Global', docType: 'NDA', status: 'Pending our signature', submittedBy: 'Alice (FI)', date: '2026-03-10' },
-  { id: 102, channelName: 'Adyen APAC', docType: 'Master Agreement', status: 'Under corridor review', submittedBy: 'Bob (FI)', date: '2026-03-11' }
-];
+const store = useAppStore();
+const windowHeight = ref(typeof window !== 'undefined' ? window.innerHeight : 900);
 
-// --- 状态定义 ---
-const currentView = ref('list');
-const activeTask = ref<LegalTask | null>(null);
-const activeDoc = ref('NDA');
-const isModalVisible = ref(false);
+const activeDocType = ref<LegalDocType>('NDA');
+const activeGroup = ref<LegalQueueGroup>('legal_pending');
+const activeSubStatus = ref<LegalQueueSubStatus>('all');
+const keyword = ref('');
+const owner = ref('all');
 
-// 保持 selectedKeys 与 activeDoc 同步
-const selectedKeys = computed({
-  get: () => [activeDoc.value],
-  set: (val: any) => {
-    if (val && val.length > 0) {
-      activeDoc.value = val[0];
-    }
-  }
+watch(activeDocType, () => {
+  activeGroup.value = 'legal_pending';
+  activeSubStatus.value = 'all';
+}, { immediate: true });
+
+watch(activeGroup, () => {
+  activeSubStatus.value = 'all';
 });
 
-const reasonForm = reactive({ reason: '' });
+const buildQueueRow = (channel: any, docType: LegalDocType): LegalQueueRow | null => {
+  const status = docType === 'MSA'
+    ? channel.contractStatus || channel.globalProgress?.contract
+    : channel.ndaStatus || channel.globalProgress?.nda;
+  const latestEvent = getLatestLegalStatusEntry(channel, docType);
+  const group = getLegalQueueGroup(docType, status);
 
-// --- 逻辑处理 ---
-const tasksColumns = [
-  { title: 'Corridor Name', dataIndex: 'channelName', key: 'channelName' },
-  { title: 'Document Type', dataIndex: 'docType', key: 'docType' },
-  { title: 'Submitted By', dataIndex: 'submittedBy', key: 'submittedBy' },
-  { title: 'Date', dataIndex: 'date', key: 'date' },
-  { title: 'Status', dataIndex: 'status', key: 'status' },
-  { title: 'Action', key: 'action' }
-];
+  if (group === 'inactive') return null;
 
-const menuItems = [
-  { key: 'NDA', label: 'NDA' },
-  { key: 'Master Agreement', label: 'Master Agreement' },
-  { key: 'Others', label: 'Others' }
-];
-
-const handleReviewClick = (task: LegalTask) => {
-  activeTask.value = task;
-  activeDoc.value = task.docType === 'NDA' ? 'NDA' : 'Master Agreement';
-  currentView.value = 'detail';
+  return {
+    id: `${channel.id}-${docType.toLowerCase()}`,
+    channel,
+    corridorName: channel.channelName || 'Unnamed Corridor',
+    fiOwner: channel.fiopOwner || 'Unassigned',
+    submittedAt: latestEvent?.time || channel.lastModifiedAt || '',
+    latestNote: latestEvent?.note || channel.legalRequestData?.[docType === 'MSA' ? 'msa' : 'nda']?.remarks || '',
+    status,
+    docType,
+    group,
+  };
 };
 
-const handleReturnToList = () => {
-  currentView.value = 'list';
-  activeTask.value = null;
-};
+const allRows = computed(() => store.channelList.flatMap((channel) => {
+  const ndaRow = buildQueueRow(channel, 'NDA');
+  const msaRow = buildQueueRow(channel, 'MSA');
+  return [ndaRow, msaRow].filter(Boolean) as LegalQueueRow[];
+}));
 
-const handleOk = () => {
-  if (!reasonForm.reason) {
-    message.error('Please enter the reason for revision');
-    return;
+const docTypeRows = computed(() => allRows.value.filter((row) => row.docType === activeDocType.value));
+
+const ownerOptions = computed(() => ([
+  { label: 'All FI owners', value: 'all' },
+  ...[...new Set(docTypeRows.value.map((row) => row.fiOwner))]
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right))
+    .map((fiOwner) => ({ label: fiOwner, value: fiOwner })),
+]));
+
+const groupCounts = computed(() => ({
+  NDA: {
+    legal_pending: allRows.value.filter((row) => row.docType === 'NDA' && row.group === 'legal_pending').length,
+    external_pending: allRows.value.filter((row) => row.docType === 'NDA' && row.group === 'external_pending').length,
+    completed: allRows.value.filter((row) => row.docType === 'NDA' && row.group === 'completed').length,
+    no_need: allRows.value.filter((row) => row.docType === 'NDA' && row.group === 'no_need').length,
+  },
+  MSA: {
+    legal_pending: allRows.value.filter((row) => row.docType === 'MSA' && row.group === 'legal_pending').length,
+    external_pending: allRows.value.filter((row) => row.docType === 'MSA' && row.group === 'external_pending').length,
+    completed: allRows.value.filter((row) => row.docType === 'MSA' && row.group === 'completed').length,
+    no_need: allRows.value.filter((row) => row.docType === 'MSA' && row.group === 'no_need').length,
+  },
+}));
+
+const docTypeCounts = computed(() => ({
+  NDA: allRows.value.filter((row) => row.docType === 'NDA').length,
+  MSA: allRows.value.filter((row) => row.docType === 'MSA').length,
+}));
+
+const currentGroupOptions = computed(() => {
+  const counts = groupCounts.value[activeDocType.value];
+  const options: Array<{ label: string; value: LegalQueueGroup }> = [
+    { label: `Legal action required (${counts.legal_pending})`, value: 'legal_pending' },
+    { label: `Waiting on Corridor (${counts.external_pending})`, value: 'external_pending' },
+    { label: `Completed (${counts.completed})`, value: 'completed' },
+  ];
+
+  if (activeDocType.value === 'NDA') {
+    options.push({ label: `No Need (${counts.no_need})`, value: 'no_need' });
   }
-  console.log('Revision Reason:', reasonForm.reason);
-  message.success('Change request sent');
-  isModalVisible.value = false;
-  reasonForm.reason = '';
+
+  return options;
+});
+
+const currentSubStatusOptions = computed(() => {
+  const baseOptions = getLegalQueueSubStatusOptions(activeDocType.value, activeGroup.value);
+  const groupedRows = docTypeRows.value.filter((row) => row.group === activeGroup.value);
+
+  return baseOptions.map((option) => ({
+    label: `${option.label} (${option.value === 'all'
+      ? groupedRows.length
+      : groupedRows.filter((row) => row.status === option.value).length})`,
+    value: option.value,
+  }));
+});
+
+const showSubStatusFilter = computed(() => (
+  activeGroup.value === 'legal_pending' || activeGroup.value === 'external_pending'
+));
+
+const filteredRows = computed(() => {
+  const normalizedKeyword = keyword.value.trim().toLowerCase();
+
+  return docTypeRows.value
+    .filter((row) => row.group === activeGroup.value)
+    .filter((row) => activeSubStatus.value === 'all' || row.status === activeSubStatus.value)
+    .filter((row) => !normalizedKeyword || row.corridorName.toLowerCase().includes(normalizedKeyword))
+    .filter((row) => owner.value === 'all' || row.fiOwner === owner.value)
+    .sort((left, right) => new Date(right.submittedAt || 0).getTime() - new Date(left.submittedAt || 0).getTime());
+});
+
+const columns = [
+  { title: 'Corridor', key: 'corridorName' },
+  { title: 'FI Owner', key: 'fiOwner' },
+  { title: 'Submitted At', key: 'submittedAt' },
+  { title: 'Latest Note', key: 'latestNote' },
+  { title: 'Current Status', key: 'status' },
+  { title: 'Action', key: 'action' },
+];
+
+const tableScrollY = computed(() => (
+  Math.max(360, windowHeight.value - (props.isStandalone ? 250 : 320))
+));
+
+const getRowTheme = (row: LegalQueueRow) => getLegalDocumentStatusTheme(row.docType, row.status);
+
+const openTask = (row: LegalQueueRow) => {
+  store.setSelectedChannel(row.channel);
+  store.openLegalDetail(row.docType, 'dashboard');
+};
+
+const buildRowClick = (record: LegalQueueRow) => ({
+  onClick: () => openTask(record),
+});
+
+const resetFilters = () => {
+  keyword.value = '';
+  owner.value = 'all';
+  activeSubStatus.value = 'all';
+};
+
+const syncWindowHeight = () => {
+  if (typeof window !== 'undefined') {
+    windowHeight.value = window.innerHeight;
+  }
 };
 
 onMounted(() => {
-  activeDoc.value = props.reviewType === 'NDA' ? 'NDA' : 'Master Agreement';
+  syncWindowHeight();
+  window.addEventListener('resize', syncWindowHeight);
 });
 
+onBeforeUnmount(() => {
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('resize', syncWindowHeight);
+  }
+});
 </script>
 
 <template>
   <div :class="['min-h-screen bg-transparent', isStandalone ? 'p-0' : 'p-6']">
-    <!-- 列表视图 -->
-    <div v-if="currentView === 'list'">
-      <div class="mb-4 px-1">
-        <h3 class="text-[20px] font-black text-slate-900 m-0">Legal Department - Pending Tasks</h3>
-      </div>
-      <a-card class="clean-card shadow-sm border border-slate-100 rounded-3xl overflow-hidden" :body-style="{ padding: '0' }">
-        <a-table :data-source="pendingTasks" :columns="tasksColumns" :row-key="(record: LegalTask) => record.id" :pagination="false">
-          <template #bodyCell="{ column, record, text }">
-            <template v-if="column.key === 'channelName'">
-              <div class="flex items-center gap-2 p-4">
-                <div class="w-8 h-8 rounded-lg bg-sky-50 flex items-center justify-center text-sky-600">
-                  <file-text-outlined />
+    <div class="queue-shell">
+      <section class="workspace-control-card">
+        <div class="workspace-control-card__copy">
+          <div class="workspace-kicker">Legal Queue</div>
+          <h2 class="workspace-title">NDA and MSA status handoff</h2>
+          <p class="workspace-subtitle">
+            Legal works from the same corridor record as FI. Open a row to review the submitted packet and sync the latest legal status back to the FI cards.
+          </p>
+        </div>
+
+        <div class="workspace-control-panel">
+          <div class="workspace-filter-group">
+            <div class="workspace-filter-label">Document</div>
+            <a-segmented
+              v-model:value="activeDocType"
+              class="workspace-segmented workspace-segmented--doc"
+              :options="[
+                { label: `NDA (${docTypeCounts.NDA})`, value: 'NDA' },
+                { label: `MSA (${docTypeCounts.MSA})`, value: 'MSA' },
+              ]"
+            />
+          </div>
+
+          <div class="workspace-filter-group">
+            <div class="workspace-filter-label">Status</div>
+            <a-segmented
+              v-model:value="activeGroup"
+              class="workspace-segmented workspace-segmented--status"
+              :options="currentGroupOptions"
+            />
+          </div>
+
+          <div v-if="showSubStatusFilter" class="workspace-filter-group">
+            <div class="workspace-filter-label">Sub Status</div>
+            <a-segmented
+              v-model:value="activeSubStatus"
+              class="workspace-subsegmented"
+              :options="currentSubStatusOptions"
+            />
+          </div>
+
+          <div class="workspace-inline-tools">
+            <a-input
+              v-model:value="keyword"
+              allow-clear
+              placeholder="Search corridor"
+              class="toolbar-control toolbar-control--search"
+            />
+            <a-select
+              v-model:value="owner"
+              class="toolbar-control toolbar-control--owner"
+              :options="ownerOptions"
+            />
+            <a-button class="toolbar-reset" @click="resetFilters">Reset</a-button>
+          </div>
+        </div>
+      </section>
+
+      <a-card class="table-card" :body-style="{ padding: '0' }">
+        <a-table
+          :data-source="filteredRows"
+          :columns="columns"
+          :pagination="{ pageSize: 8 }"
+          :scroll="{ x: 980, y: tableScrollY }"
+          :custom-row="buildRowClick"
+          row-key="id"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'corridorName'">
+              <div class="corridor-cell">
+                <div class="corridor-name">
+                  <span class="corridor-icon"><file-text-outlined /></span>
+                  <span>{{ record.corridorName }}</span>
                 </div>
-                <span class="font-black text-slate-900">{{ text }}</span>
+                <div class="corridor-subline">{{ record.docType }} packet from FIOP</div>
               </div>
             </template>
-            <template v-if="column.key === 'status'">
-              <a-tag color="orange" class="rounded-full px-3 py-0.5 font-bold border-none">{{ text }}</a-tag>
+
+            <template v-else-if="column.key === 'fiOwner'">
+              <a-tag class="owner-tag">{{ record.fiOwner }}</a-tag>
             </template>
+
+            <template v-else-if="column.key === 'submittedAt'">
+              <span class="value-text">{{ record.submittedAt || '-' }}</span>
+            </template>
+
+            <template v-else-if="column.key === 'latestNote'">
+              <div class="note-cell">{{ record.latestNote || 'No note yet' }}</div>
+            </template>
+
+            <template v-else-if="column.key === 'status'">
+              <a-tag
+                :style="{ backgroundColor: getRowTheme(record).bg, color: getRowTheme(record).text, border: 'none', borderRadius: '999px', fontWeight: 800, padding: '4px 12px' }"
+              >
+                {{ record.status }}
+              </a-tag>
+            </template>
+
             <template v-else-if="column.key === 'action'">
-              <a-button type="primary" @click="handleReviewClick(record)" class="rounded-lg px-6 font-bold">Review Document</a-button>
+              <a-button type="link" class="action-link" @click.stop="openTask(record)">View</a-button>
             </template>
+          </template>
+
+          <template #emptyText>
+            <a-empty description="No legal tasks match the current filters." />
           </template>
         </a-table>
       </a-card>
     </div>
-
-    <!-- 详情视图 -->
-    <div v-else>
-      <div class="mb-6 flex justify-between items-center px-1">
-        <a-button type="text" @click="handleReturnToList" :style="{ color: '#64748b', padding: 0 }" class="flex items-center font-bold hover:text-slate-800 transition-colors">
-          <template #icon><arrow-left-outlined /></template>
-          Return to Task List
-        </a-button>
-        <div class="flex items-center gap-3">
-          <div class="text-[14px] text-slate-500 font-bold uppercase tracking-widest">Corridor:</div>
-          <div class="text-[18px] font-black text-slate-900 uppercase tracking-tight">{{ activeTask?.channelName }}</div>
-        </div>
-      </div>
-
-      <a-layout style="background: transparent;">
-        <!-- 左侧文档预览 -->
-        <a-layout-sider width="55%" style="background: transparent; padding-right: 16px;">
-          <div class="mb-4 flex items-center justify-between px-1">
-            <h4 class="text-[18px] font-black text-slate-900 m-0">Document Viewer</h4>
-            <a-tag color="blue" class="m-0 font-black rounded-full px-3 py-0.5 border-none bg-sky-100 text-sky-700 text-[11px] uppercase tracking-wider">{{ activeDoc }}</a-tag>
-          </div>
-          <a-card 
-            class="clean-card shadow-sm border border-slate-100 rounded-3xl overflow-hidden flex flex-col" 
-            :body-style="{ height: 'calc(100vh - 350px)', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc' }"
-          >
-            <div class="text-center">
-              <div class="w-24 h-24 bg-white rounded-3xl shadow-sm border border-slate-100 flex items-center justify-center mx-auto mb-6">
-                <file-text-outlined :style="{ fontSize: '48px', color: '#cbd5e1' }" />
-              </div>
-              <h4 class="text-[#475569] text-[18px] font-black tracking-tight mb-2">{{ activeDoc }} Preview</h4>
-              <p class="text-[14px] text-slate-400 font-medium">Digital Copy for Review</p>
-            </div>
-          </a-card>
-          <div class="mt-6 bg-slate-100/50 p-1 rounded-2xl border border-slate-200">
-            <a-menu
-              v-model:selectedKeys="selectedKeys"
-              mode="horizontal"
-              class="bg-transparent flex justify-center border-none fitrem-menu"
-            >
-              <a-menu-item v-for="item in menuItems" :key="item.key" class="rounded-xl px-8 font-bold">{{ item.label }}</a-menu-item>
-            </a-menu>
-          </div>
-        </a-layout-sider>
-
-        <!-- 右侧审批操作 -->
-        <a-layout-content style="padding-left: 16px;">
-          <a-space direction="vertical" size="large" class="w-full">
-            <div>
-              <div class="mb-4 px-1">
-                <h4 class="text-[18px] font-black text-slate-900 m-0">Basic Information</h4>
-              </div>
-              <a-card class="clean-card shadow-sm border border-slate-100 rounded-3xl overflow-hidden" :body-style="{ padding: '32px' }">
-                <div v-if="activeDoc === 'NDA'">
-                  <a-descriptions bordered :column="1" size="small" class="fitrem-descriptions">
-                    <a-descriptions-item label="Corridor Name">{{ activeTask?.channelName }}</a-descriptions-item>
-                    <a-descriptions-item label="Point of Contact (POC)">{{ channelData?.pointOfContact || 'N/A' }}</a-descriptions-item>
-                    <a-descriptions-item label="Cooperation Model">{{ channelData?.cooperationModel || 'N/A' }}</a-descriptions-item>
-                    <a-descriptions-item label="Supported Products">
-                      {{ Array.isArray(channelData?.supportedProducts) ? channelData.supportedProducts.join(', ') : 'N/A' }}
-                    </a-descriptions-item>
-                  </a-descriptions>
-                </div>
-                <div v-else class="space-y-4">
-                  <div class="p-4 rounded-2xl bg-slate-50 border border-slate-100">
-                    <div class="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-1">Corridor Name</div>
-                    <div class="text-[16px] font-black text-slate-900">{{ activeTask?.channelName }}</div>
-                  </div>
-                  <div class="flex items-center gap-3 p-4 rounded-2xl bg-emerald-50 border border-emerald-100">
-                    <div class="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-emerald-500 shadow-sm">
-                      <check-circle-outlined style="font-size: 20px;" />
-                    </div>
-                    <div>
-                      <div class="text-[11px] font-black text-emerald-600 uppercase tracking-widest mb-0.5">Prerequisite Check</div>
-                      <div class="text-[14px] font-bold text-emerald-700">NDA Signed & Executed</div>
-                    </div>
-                  </div>
-                </div>
-              </a-card>
-            </div>
-
-            <template v-if="activeDoc === 'Master Agreement'">
-              <div>
-                <div class="mb-4 px-1">
-                  <h4 class="text-[18px] font-black text-slate-900 m-0">Assign Reviewers</h4>
-                </div>
-                <a-card class="clean-card shadow-sm border border-slate-100 rounded-3xl overflow-hidden" :body-style="{ padding: '32px' }">
-                  <a-input-group compact class="w-full flex h-12">
-                    <a-select default-value="disabled" class="flex-1 custom-select-height">
-                      <a-select-option value="disabled" disabled>Invite other departments for joint review</a-select-option>
-                      <a-select-option value="risk">Risk Management</a-select-option>
-                      <a-select-option value="finance">Finance</a-select-option>
-                      <a-select-option value="vp">Business VP</a-select-option>
-                    </a-select>
-                    <a-button type="primary" class="h-full px-8 rounded-r-xl font-bold bg-sky-600 border-none"><template #icon><send-outlined /></template>Send Invite</a-button>
-                  </a-input-group>
-                </a-card>
-              </div>
-
-              <div>
-                <div class="mb-4 px-1">
-                  <h4 class="text-[18px] font-black text-slate-900 m-0">Contract ID & Archiving</h4>
-                </div>
-                <a-card class="clean-card shadow-sm border border-slate-100 rounded-3xl overflow-hidden" :body-style="{ padding: '32px' }">
-                  <a-form layout="vertical">
-                    <a-form-item label="Contract ID Prefix">
-                      <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Contract ID Prefix</span></template>
-                      <a-input disabled :value="`[CN-${activeTask?.channelName?.split(' ')[0].toUpperCase()}-2023001]`" class="h-12 rounded-xl bg-slate-50 border-slate-200 font-mono font-bold text-slate-500" />
-                    </a-form-item>
-                    <a-form-item class="mb-0">
-                      <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Signing & Archiving Method</span></template>
-                      <a-radio-group default-value="docusign" class="flex gap-8 mt-2">
-                        <a-radio value="docusign" class="font-bold text-slate-600">Online (DocuSign)</a-radio>
-                        <a-radio value="offline" class="font-bold text-slate-600">Offline Scan</a-radio>
-                      </a-radio-group>
-                    </a-form-item>
-                  </a-form>
-                </a-card>
-              </div>
-            </template>
-
-            <a-card class="clean-card shadow-sm border border-slate-100 rounded-3xl overflow-hidden" :body-style="{ padding: '24px' }">
-              <div class="flex gap-4">
-                <a-button danger block size="large" @click="isModalVisible = true" class="h-14 rounded-2xl font-black text-[15px] shadow-sm"><template #icon><close-circle-outlined /></template>Request Changes</a-button>
-                <a-button type="primary" block size="large" @click="() => message.success('Action successful')" class="h-14 rounded-2xl font-black text-[15px] bg-sky-600 border-none shadow-lg shadow-sky-100"><template #icon><check-circle-outlined /></template>{{ activeDoc === 'NDA' ? 'Approve NDA' : 'Approve & Archive' }}</a-button>
-              </div>
-            </a-card>
-          </a-space>
-        </a-layout-content>
-      </a-layout>
-    </div>
-
-    <!-- 弹窗 -->
-    <a-modal v-model:open="isModalVisible" title="Request Changes" @ok="handleOk" :ok-button-props="{ class: 'bg-sky-600 border-none rounded-lg font-bold h-10 px-6' }" :cancel-button-props="{ class: 'rounded-lg font-bold h-10 px-6' }">
-      <a-form layout="vertical" class="mt-4">
-        <a-form-item required>
-          <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Reason for Revision</span></template>
-          <a-textarea v-model:value="reasonForm.reason" :rows="4" class="rounded-xl border-slate-200 p-4" placeholder="Provide actionable feedback for the FI department..." />
-        </a-form-item>
-      </a-form>
-    </a-modal>
   </div>
 </template>
 
 <style scoped>
-.clean-card {
-  background: #ffffff !important;
-  border-radius: 24px !important;
+.queue-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: calc(100vh - 48px);
 }
 
-:deep(.ant-table) { background: transparent !important; }
-:deep(.ant-table-thead > tr > th) {
-  background: #f8fafc !important;
-  color: #64748b !important;
-  font-weight: 700 !important;
-  font-size: 12px !important;
-  text-transform: uppercase !important;
-  letter-spacing: 0.05em !important;
-  border-bottom: 1px solid #f1f5f9 !important;
+.workspace-control-card,
+.table-card {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 18px;
+  box-shadow: 0 10px 30px -24px rgba(15, 23, 42, 0.3);
 }
 
-:deep(.fitrem-descriptions .ant-descriptions-item-label) {
-  background: #f8fafc !important;
-  color: #64748b !important;
-  font-weight: 700 !important;
-  font-size: 12px !important;
-  text-transform: uppercase !important;
-  letter-spacing: 0.05em !important;
-  width: 180px;
+.workspace-control-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.95fr);
+  gap: 18px;
+  align-items: start;
+  padding: 20px 22px;
 }
 
-:deep(.fitrem-menu) {
-  line-height: 48px;
+.workspace-control-card__copy {
+  min-width: 0;
 }
 
-:deep(.fitrem-menu .ant-menu-item-selected) {
-  background: #ffffff !important;
+.workspace-kicker {
+  color: #0284c7;
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+}
+
+.workspace-title {
+  margin: 8px 0 0;
+  color: #111827;
+  font-size: 24px;
+  font-weight: 900;
+  line-height: 1.1;
+}
+
+.workspace-subtitle {
+  margin: 8px 0 0;
+  color: #6b7280;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.55;
+  max-width: 640px;
+}
+
+.workspace-control-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.workspace-filter-group {
+  display: grid;
+  gap: 6px;
+}
+
+.workspace-filter-label {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.workspace-segmented {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  padding: 3px;
+}
+
+.workspace-segmented--doc {
+  background: #f0f9ff;
+  border-color: #bae6fd;
+}
+
+.workspace-segmented :deep(.ant-segmented-item) {
+  min-height: 36px;
+  border-radius: 9px;
+}
+
+.workspace-segmented :deep(.ant-segmented-item-label) {
+  padding: 7px 11px;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.workspace-segmented :deep(.ant-segmented-item-selected) {
   color: #0284c7 !important;
-  box-shadow: 0 4px 12px rgba(2, 132, 199, 0.12);
 }
 
-:deep(.custom-select-height .ant-select-selector) {
-  height: 48px !important;
-  border-radius: 12px 0 0 12px !important;
-  display: flex !important;
-  align-items: center !important;
+.workspace-subsegmented {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  padding: 3px;
+}
+
+.workspace-subsegmented :deep(.ant-segmented-item) {
+  min-height: 32px;
+  border-radius: 8px;
+}
+
+.workspace-subsegmented :deep(.ant-segmented-item-label) {
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+  white-space: normal;
+}
+
+.workspace-subsegmented :deep(.ant-segmented-item-selected) {
+  color: #0f172a !important;
+}
+
+.workspace-inline-tools {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.45fr) minmax(210px, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.toolbar-control {
+  width: 100%;
+}
+
+.toolbar-control :deep(.ant-select-selector),
+.toolbar-control :deep(.ant-input),
+.toolbar-control :deep(.ant-input-affix-wrapper) {
+  min-height: 40px;
+  border-radius: 11px !important;
+}
+
+.toolbar-control--search,
+.toolbar-control--owner {
+  min-width: 0;
+}
+
+.toolbar-reset {
+  height: 40px;
+  border-radius: 11px;
+  font-weight: 800;
+  padding-inline: 16px;
+  color: #475569;
+  border-color: #dbe3ef;
+  background: #f8fafc;
+}
+
+.corridor-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.corridor-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #111827;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.corridor-icon {
+  display: inline-flex;
+  height: 28px;
+  width: 28px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: #f0f9ff;
+  color: #0284c7;
+}
+
+.corridor-subline {
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.owner-tag {
+  border: none;
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 800;
+  background: #f8fafc;
+  color: #475569;
+}
+
+.value-text,
+.note-cell {
+  color: #475569;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.note-cell {
+  line-height: 1.6;
+  max-width: 360px;
+}
+
+.action-link {
+  padding: 0;
+  font-weight: 800;
+}
+
+.table-card {
+  flex: 1;
+  overflow: hidden;
+}
+
+.table-card :deep(.ant-card-body) {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.table-card :deep(.ant-table-wrapper) {
+  flex: 1;
+}
+
+@media (max-width: 1180px) {
+  .workspace-control-card {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-inline-tools {
+    grid-template-columns: minmax(0, 1fr) minmax(220px, 0.9fr) auto;
+  }
+}
+
+@media (max-width: 720px) {
+  .queue-shell {
+    min-height: auto;
+  }
+
+  .workspace-control-card {
+    padding: 18px 16px;
+  }
+
+  .workspace-inline-tools {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

@@ -21,7 +21,10 @@ const ChannelOnboarding = defineAsyncComponent(() => import('./components/Channe
 const KycHubPage = defineAsyncComponent(() => import('./components/KycHubPage.vue'));
 const KycReviewWorkspace = defineAsyncComponent(() => import('./components/KycReviewWorkspace.vue'));
 const KycReviewDetailPage = defineAsyncComponent(() => import('./components/KycReviewDetailPage.vue'));
+const LegalFiDetailPage = defineAsyncComponent(() => import('./components/LegalFiDetailPage.vue'));
 const LegalApprovalWorkspace = defineAsyncComponent(() => import('./components/LegalApprovalWorkspace.vue'));
+const PricingApprovalWorkspace = defineAsyncComponent(() => import('./components/PricingApprovalWorkspace.vue'));
+const PricingApprovalDetailPage = defineAsyncComponent(() => import('./components/PricingApprovalDetailPage.vue'));
 const TechWorkspace = defineAsyncComponent(() => import('./components/TechWorkspace.vue'));
 
 const store = useAppStore();
@@ -143,10 +146,10 @@ const handleRoleChange = (val: string) => {
                 <span class="text-[13px] font-bold" :style="{ color: store.role === 'Fund' ? '#0f172a' : '#475569' }">Fund</span>
               </div>
             </a-select-option>
-            <a-select-option value="Risk Control">
+            <a-select-option value="FI Supervisor">
               <div class="flex items-center gap-2.5 px-1 py-1">
-                <safety-certificate-outlined :style="{ color: store.role === 'Risk Control' ? '#0f172a' : '#94a3b8' }" class="text-[15px]" />
-                <span class="text-[13px] font-bold" :style="{ color: store.role === 'Risk Control' ? '#0f172a' : '#475569' }">Risk Control</span>
+                <safety-certificate-outlined :style="{ color: store.role === 'FI Supervisor' ? '#0f172a' : '#94a3b8' }" class="text-[15px]" />
+                <span class="text-[13px] font-bold" :style="{ color: store.role === 'FI Supervisor' ? '#0f172a' : '#475569' }">FI Supervisor</span>
               </div>
             </a-select-option>
             <a-select-option value="Compliance">
@@ -268,6 +271,18 @@ const handleRoleChange = (val: string) => {
         </div>
         <div v-else-if="store.view === 'kycReviewDetail'">
           <KycReviewDetailPage />
+        </div>
+        <div v-else-if="store.view === 'ndaDetail'">
+          <LegalFiDetailPage docType="NDA" />
+        </div>
+        <div v-else-if="store.view === 'msaDetail'">
+          <LegalFiDetailPage docType="MSA" />
+        </div>
+        <div v-else-if="store.view === 'pricingApprovalDetail'" class="py-8 px-4">
+          <PricingApprovalDetailPage />
+        </div>
+        <div v-else-if="store.role === 'FI Supervisor'" class="py-8 px-4">
+          <PricingApprovalWorkspace :isStandalone="true" />
         </div>
         <div v-else-if="store.role === 'Compliance'" class="py-8 px-4">
           <KycReviewWorkspace :isStandalone="true" />

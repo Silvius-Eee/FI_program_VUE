@@ -25,6 +25,7 @@ import {
 } from '../constants/channelOptions';
 import { buildPricingScheduleSummary } from '../constants/initialData';
 import { applyOnboardingSubmission, getChannelOnboardingWorkflow } from '../constants/onboarding';
+import { applyLegalStatusUpdate, getDefaultLegalSubmissionStatus } from '../utils/workflowStatus';
 import WorkflowBoard from './WorkflowBoard.vue';
 import WorkflowSidePanel from './WorkflowSidePanel.vue';
 import CddWorkflowPanelContent from './CddWorkflowPanelContent.vue';
@@ -163,8 +164,8 @@ const submissionHistoryEntries = computed(() => {
   const stageStatusMap: Record<string, string> = {
     cdd: channel.value.corridorOnboardingStatus || channel.value.complianceStatus || 'Not Started',
     kyc: channel.value.wooshpayOnboardingStatus || channel.value.globalProgress?.kyc || 'Not Started',
-    nda: channel.value.globalProgress?.nda || 'Not Started',
-    msa: channel.value.globalProgress?.contract || 'Not Started',
+    nda: channel.value.ndaStatus || channel.value.globalProgress?.nda || 'Not Started',
+    msa: channel.value.contractStatus || channel.value.globalProgress?.contract || 'Not Started',
     tech: channel.value.globalProgress?.tech || 'Not Started',
   };
 
@@ -738,7 +739,22 @@ const handleWorkflowNodeClick = (key: string) => {
     return;
   }
 
-  if (['kyc-cdd', 'kyc-onboarding', 'nda', 'msa', 'pricing', 'tech'].includes(key)) {
+  if (key === 'nda') {
+    store.openLegalDetail('NDA', 'detail');
+    return;
+  }
+
+  if (key === 'msa') {
+    store.openLegalDetail('MSA', 'detail');
+    return;
+  }
+
+  if (key === 'pricing') {
+    store.setView('pricing');
+    return;
+  }
+
+  if (['kyc-cdd', 'kyc-onboarding', 'tech'].includes(key)) {
     activeWorkflowPanel.value = key as WorkflowPanelKey;
     return;
   }
@@ -778,12 +794,19 @@ const handleCddSubmit = (values: any) => {
   const timestamp = dayjs().format('YYYY-MM-DD HH:mm:ss');
   const updated = {
     ...applyOnboardingSubmission(channel.value, 'corridor', {
-      documentLink: values.documentLink,
-      notes: values.notes,
-      attachments: values.attachments,
+      contactName: values.contactName,
+      contactMethod: values.contactMethod,
+      contactValue: values.contactValue,
+      handoffNote: values.handoffNote,
+      notes: values.handoffNote,
+      documentLink: '',
+      attachments: [],
     }, 'Current User', timestamp),
+    pocName: values.contactName,
+    pocMethod: values.contactMethod,
+    pocDetail: values.contactValue,
     auditLogs: [
-      { time: timestamp, user: 'Current User', action: 'Submitted Corridor onboarding package to Compliance.', color: 'blue' },
+      { time: timestamp, user: 'Current User', action: 'Submitted Corridor onboarding details to Compliance.', color: 'blue' },
       ...(channel.value.auditLogs || [])
     ]
   };
@@ -800,7 +823,7 @@ const handleKycSubmit = (values: any) => {
       attachments: values.attachments,
     }, 'Current User', timestamp),
     auditLogs: [
-      { time: timestamp, user: 'Current User', action: 'Submitted WooshPay onboarding package to Compliance.', color: 'blue' },
+      { time: timestamp, user: 'Current User', action: 'Submitted WooshPay onboarding details to Compliance.', color: 'blue' },
       ...(channel.value.auditLogs || [])
     ]
   };
@@ -808,26 +831,24 @@ const handleKycSubmit = (values: any) => {
 };
 
 const handleLegalSubmit = (values: any) => {
-  const time = dayjs().format('YYYY-MM-DD');
-  const stageKey = values.docType.toLowerCase() === 'msa' ? 'contract' : values.docType.toLowerCase();
-  const historyKey = values.docType.toLowerCase() === 'msa' ? 'msa' : values.docType.toLowerCase();
+  const submittedAt = dayjs().format('YYYY-MM-DD HH:mm:ss');
   const documentTitle = resolveLegalDocumentTitle(values.docType);
-  
-  const updated = {
-    ...channel.value,
-    globalProgress: {
-      ...channel.value.globalProgress,
-      [stageKey]: 'Under Review'
+  const legalSubmittedStatus = getDefaultLegalSubmissionStatus(values.docType === 'MSA' ? 'MSA' : 'NDA');
+  const updated = applyLegalStatusUpdate({
+    channel: channel.value,
+    docType: values.docType === 'MSA' ? 'MSA' : 'NDA',
+    actorRole: 'FIOP',
+    actorName: channel.value.fiopOwner || 'Current User',
+    nextStatus: legalSubmittedStatus,
+    note: String(values.remarks || '').trim() || `Submitted ${documentTitle} to Legal for review.`,
+    timestamp: submittedAt,
+    packetUpdate: {
+      entities: Array.isArray(values.entities) ? values.entities : [],
+      documentLink: String(values.documentLink || '').trim(),
+      remarks: String(values.remarks || '').trim(),
+      attachments: Array.isArray(values.attachments) ? values.attachments : [],
     },
-    submissionHistory: {
-      ...channel.value.submissionHistory,
-      [historyKey]: { date: time, user: 'Current User', notes: values.remarks }
-    },
-    auditLogs: [
-      { time: dayjs().format('YYYY-MM-DD HH:mm:ss'), user: 'Current User', action: `Submitted ${documentTitle} to Legal for review.`, color: 'blue' },
-      ...(channel.value.auditLogs || [])
-    ]
-  };
+  });
   store.updateChannel(updated);
 };
 
@@ -845,6 +866,7 @@ const handlePricingSubmit = (values: any) => {
             : proposal
         ))
       : pricingProposals.value,
+    pricingProposalStatus: 'In Review',
     globalProgress: {
       ...channel.value.globalProgress,
       pricing: 'In Progress'

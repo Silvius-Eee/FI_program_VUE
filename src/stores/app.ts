@@ -48,7 +48,7 @@ type PersistedChannelDataState = {
   kycQueueScrollTop?: unknown;
 };
 
-type KycQueueTab = 'in_progress' | 'need_fi_input' | 'done';
+type KycQueueTab = 'reviewing' | 'preparation' | 'completed' | 'no_need';
 
 type KycQueueFilters = {
   keyword: string;
@@ -228,19 +228,6 @@ const sanitizeStoredViews = (
     const candidate = item as Record<string, unknown>;
     const name = String(candidate.name ?? '').trim();
     const columns = sanitizeStoredColumns(candidate.columns, validColumns);
-    const rawColumns = Array.isArray(candidate.columns)
-      ? candidate.columns.map((column) => String(column ?? '').trim())
-      : [];
-    const hadLegacyComplianceColumn = rawColumns.includes('complianceStatus');
-    if (
-      mode === 'corridor'
-      && hadLegacyComplianceColumn
-      && columns.includes('wooshpayOnboardingStatus')
-      && !columns.includes('corridorOnboardingStatus')
-    ) {
-      const wooshpayIndex = columns.indexOf('wooshpayOnboardingStatus');
-      columns.splice(wooshpayIndex + 1, 0, 'corridorOnboardingStatus');
-    }
     if (!name || !columns.length) return views;
 
     const rawId = String(candidate.id ?? '').trim() || buildFallbackViewId(mode, index);
@@ -349,7 +336,7 @@ const hydrateChannelDataState = () => {
   const fallbackKycHubTrack: OnboardingTrack = 'wooshpay';
   const fallbackKycHubPerspective = 'submit';
   const fallbackKycHubReturnView = 'detail';
-  const fallbackKycQueueTab: KycQueueTab = 'in_progress';
+  const fallbackKycQueueTab: KycQueueTab = 'reviewing';
   const fallbackKycQueueFilters: KycQueueFilters = {
     keyword: '',
     track: 'all',
@@ -420,11 +407,13 @@ const hydrateChannelDataState = () => {
       kycHubReturnView: typeof parsedState?.kycHubReturnView === 'string' && parsedState.kycHubReturnView.trim()
         ? parsedState.kycHubReturnView
         : fallbackKycHubReturnView,
-      kycQueueTab: parsedState?.kycQueueTab === 'done'
-        ? 'done'
-        : parsedState?.kycQueueTab === 'need_fi_input' || parsedState?.kycQueueTab === 'waiting'
-          ? 'need_fi_input'
-          : 'in_progress',
+      kycQueueTab: parsedState?.kycQueueTab === 'no_need'
+        ? 'no_need'
+        : parsedState?.kycQueueTab === 'completed' || parsedState?.kycQueueTab === 'done'
+          ? 'completed'
+          : parsedState?.kycQueueTab === 'preparation' || parsedState?.kycQueueTab === 'need_fi_input' || parsedState?.kycQueueTab === 'waiting'
+            ? 'preparation'
+            : 'reviewing',
       kycQueueFilters: parsedState?.kycQueueFilters && typeof parsedState.kycQueueFilters === 'object'
         ? {
             keyword: String((parsedState.kycQueueFilters as Record<string, unknown>).keyword || ''),
@@ -479,6 +468,8 @@ export const useAppStore = defineStore('app', () => {
   const kycHubTrack = ref<OnboardingTrack>(hydratedChannelDataState.kycHubTrack as OnboardingTrack);
   const kycHubPerspective = ref<'submit' | 'review'>(hydratedChannelDataState.kycHubPerspective as 'submit' | 'review');
   const kycHubReturnView = ref(String(hydratedChannelDataState.kycHubReturnView || 'detail'));
+  const legalDetailReturnView = ref('detail');
+  const selectedPricingProposalId = ref<string | null>(null);
   const kycHubDraftMap = ref<Record<string, any>>(hydratedChannelDataState.kycHubDraftMap);
   const kycQueueTab = ref<KycQueueTab>(hydratedChannelDataState.kycQueueTab as KycQueueTab);
   const kycQueueFilters = ref<KycQueueFilters>(hydratedChannelDataState.kycQueueFilters as KycQueueFilters);
@@ -570,7 +561,57 @@ export const useAppStore = defineStore('app', () => {
 
   // Actions
   const setRole = (newRole: string) => {
+    const previousRole = role.value;
     role.value = newRole;
+
+    if (newRole === 'Compliance') {
+      if (
+        view.value === 'kycSubmit'
+        || view.value === 'detail'
+        || view.value === 'pricing'
+        || view.value === 'pricingApprovalDetail'
+        || view.value === 'form'
+        || view.value === 'ndaDetail'
+        || view.value === 'msaDetail'
+      ) {
+        selectedPricingProposalId.value = null;
+        view.value = 'dashboard';
+      }
+      return;
+    }
+
+    if (
+      newRole === 'Legal'
+      && (
+        view.value === 'kycSubmit'
+        || view.value === 'kycReviewDetail'
+        || view.value === 'pricingApprovalDetail'
+        || view.value === 'ndaDetail'
+        || view.value === 'msaDetail'
+      )
+    ) {
+      selectedPricingProposalId.value = null;
+      view.value = 'dashboard';
+      return;
+    }
+
+    if (newRole === 'FI Supervisor') {
+      selectedPricingProposalId.value = null;
+      if (view.value !== 'pricingApprovalDetail') {
+        view.value = 'dashboard';
+      }
+      return;
+    }
+
+    if (previousRole === 'Compliance' && view.value === 'kycReviewDetail') {
+      view.value = selectedChannel.value ? 'detail' : 'dashboard';
+      return;
+    }
+
+    if (previousRole === 'FI Supervisor' && view.value === 'pricingApprovalDetail') {
+      selectedPricingProposalId.value = null;
+      view.value = selectedChannel.value ? 'detail' : 'dashboard';
+    }
   };
 
   const setView = (newView: string) => {
@@ -583,6 +624,9 @@ export const useAppStore = defineStore('app', () => {
       : null;
     const nextChannel = matchedChannel ? withChannelDefaults(matchedChannel) : null;
     selectedChannel.value = nextChannel;
+    if (!nextChannel) {
+      selectedPricingProposalId.value = null;
+    }
     if (nextChannel) {
       techStepsData.value = nextChannel.techStepsData || createTechStepsData('notStarted');
     } else {
@@ -730,6 +774,23 @@ export const useAppStore = defineStore('app', () => {
     view.value = 'dashboard';
   };
 
+  const openLegalDetail = (
+    docType: 'NDA' | 'MSA',
+    returnView = 'detail',
+  ) => {
+    legalDetailReturnView.value = returnView || view.value || 'detail';
+    view.value = docType === 'MSA' ? 'msaDetail' : 'ndaDetail';
+  };
+
+  const closeLegalDetail = () => {
+    if (legalDetailReturnView.value === 'detail' || legalDetailReturnView.value === 'pricing') {
+      view.value = legalDetailReturnView.value;
+      return;
+    }
+
+    view.value = 'dashboard';
+  };
+
   const openKycReviewDetail = (
     channel: any,
     options: {
@@ -745,6 +806,19 @@ export const useAppStore = defineStore('app', () => {
   };
 
   const closeKycReviewDetail = () => {
+    view.value = 'dashboard';
+  };
+
+  const openPricingApprovalDetail = (channel: any, proposalId: string) => {
+    if (channel) {
+      setSelectedChannel(channel);
+    }
+    selectedPricingProposalId.value = proposalId || null;
+    view.value = 'pricingApprovalDetail';
+  };
+
+  const closePricingApprovalDetail = () => {
+    selectedPricingProposalId.value = null;
     view.value = 'dashboard';
   };
 
@@ -792,6 +866,13 @@ export const useAppStore = defineStore('app', () => {
     kycHubDraftMap.value = nextDraftMap;
   };
 
+  // Re-apply channel normalization once after store init so migrated statuses
+  // are written back to local storage instead of only being cleaned in memory.
+  setChannelList(channelList.value);
+  if (selectedChannel.value) {
+    setSelectedChannel(selectedChannel.value);
+  }
+
   return {
     role,
     view,
@@ -811,6 +892,8 @@ export const useAppStore = defineStore('app', () => {
     kycHubTrack,
     kycHubPerspective,
     kycHubReturnView,
+    legalDetailReturnView,
+    selectedPricingProposalId,
     kycHubDraftMap,
     kycQueueTab,
     kycQueueFilters,
@@ -833,8 +916,12 @@ export const useAppStore = defineStore('app', () => {
     setKycQueueScrollTop,
     openKycSubmit,
     closeKycSubmit,
+    openLegalDetail,
+    closeLegalDetail,
     openKycReviewDetail,
     closeKycReviewDetail,
+    openPricingApprovalDetail,
+    closePricingApprovalDetail,
     openKycHub,
     closeKycHub,
     getKycHubDraft,

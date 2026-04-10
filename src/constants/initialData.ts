@@ -1,9 +1,19 @@
 
 import {
   buildOnboardingHistoryEntry,
+  getAggregatedOnboardingStatusKey,
+  getAggregatedOnboardingStatusLabel,
   getChannelOnboardingWorkflow,
   getOnboardingStatusLabel,
 } from './onboarding';
+import {
+  buildLegalSubmissionHistoryEntry,
+  getLegalRequestPacket,
+  getLegalStatusHistory,
+  normalizeNdaStatusLabel,
+  normalizeMsaStatusLabel,
+  normalizeWorkflowStatusLabel,
+} from '../utils/workflowStatus';
 
 // --- 基础配置 ---
 export const APP_HEADER_HEIGHT = 64;
@@ -59,8 +69,7 @@ export const GLOBAL_REGION_VALUE = 'Global';
 export const DEFAULT_CORRIDOR_COLUMNS = [
   'channelName',
   'status',
-  'wooshpayOnboardingStatus',
-  'corridorOnboardingStatus',
+  'complianceStatus',
   'ndaStatus',
   'contractStatus',
   'pricingProposalStatus',
@@ -83,8 +92,7 @@ const DASHBOARD_FILTERABLE_FIELD_KEYS = new Set([
   'settlementCurrency',
   'paymentMethodName',
   'paymentMethods',
-  'wooshpayOnboardingStatus',
-  'corridorOnboardingStatus',
+  'complianceStatus',
   'ndaStatus',
   'contractStatus',
   'pricingProposalStatus',
@@ -92,25 +100,25 @@ const DASHBOARD_FILTERABLE_FIELD_KEYS = new Set([
 ]);
 
 export const DASHBOARD_FIELD_KEY_MIGRATION_MAP: Record<string, string> = {
-  complianceStatus: 'wooshpayOnboardingStatus',
+  wooshpayOnboardingStatus: 'complianceStatus',
+  corridorOnboardingStatus: 'complianceStatus',
 };
 
 export const DEFAULT_CORRIDOR_FIELD_DEFINITIONS: DashboardFieldDefinition[] = [
   { key: 'channelName', mode: 'corridor', label: 'Corridor Name', kind: 'system', sourceKey: 'channelName', order: 0, filterable: false },
   { key: 'status', mode: 'corridor', label: 'Status', kind: 'system', sourceKey: 'status', order: 1, filterable: true },
-  { key: 'wooshpayOnboardingStatus', mode: 'corridor', label: 'WooshPay onboarding', kind: 'system', sourceKey: 'wooshpayOnboardingStatus', order: 2, filterable: true },
-  { key: 'corridorOnboardingStatus', mode: 'corridor', label: 'Corridor onboarding', kind: 'system', sourceKey: 'corridorOnboardingStatus', order: 3, filterable: true },
-  { key: 'ndaStatus', mode: 'corridor', label: 'NDA', kind: 'system', sourceKey: 'ndaStatus', order: 4, filterable: true },
-  { key: 'contractStatus', mode: 'corridor', label: 'Contract', kind: 'system', sourceKey: 'contractStatus', order: 5, filterable: true },
-  { key: 'pricingProposalStatus', mode: 'corridor', label: 'Pricing', kind: 'system', sourceKey: 'pricingProposalStatus', order: 6, filterable: true },
-  { key: 'techStatus', mode: 'corridor', label: 'Tech', kind: 'system', sourceKey: 'techStatus', order: 7, filterable: true },
-  { key: 'fiopOwner', mode: 'corridor', label: 'FI Owner', kind: 'system', sourceKey: 'fiopOwner', order: 8, filterable: true },
-  { key: 'fiopTrackingLatest', mode: 'corridor', label: 'FIOP Tracking', kind: 'system', sourceKey: 'fiopTrackingLatest', order: 9, filterable: false },
-  { key: 'cooperationModel', mode: 'corridor', label: 'Cooperation', kind: 'system', sourceKey: 'cooperationModel', order: 10, filterable: true },
-  { key: 'merchantGeo', mode: 'corridor', label: 'Merchant Geo Allowed', kind: 'system', sourceKey: 'merchantGeo', order: 11, filterable: true },
-  { key: 'supportedProducts', mode: 'corridor', label: 'Supported Products', kind: 'system', sourceKey: 'supportedProducts', order: 12, filterable: true },
-  { key: 'createdAt', mode: 'corridor', label: 'Creation Time', kind: 'system', sourceKey: 'createdAt', order: 13, filterable: false },
-  { key: 'lastModifiedAt', mode: 'corridor', label: 'Last Update Time', kind: 'system', sourceKey: 'lastModifiedAt', order: 14, filterable: false },
+  { key: 'complianceStatus', mode: 'corridor', label: 'Compliance', kind: 'system', sourceKey: 'complianceStatus', order: 2, filterable: true },
+  { key: 'ndaStatus', mode: 'corridor', label: 'NDA', kind: 'system', sourceKey: 'ndaStatus', order: 3, filterable: true },
+  { key: 'contractStatus', mode: 'corridor', label: 'Contract', kind: 'system', sourceKey: 'contractStatus', order: 4, filterable: true },
+  { key: 'pricingProposalStatus', mode: 'corridor', label: 'Pricing', kind: 'system', sourceKey: 'pricingProposalStatus', order: 5, filterable: true },
+  { key: 'techStatus', mode: 'corridor', label: 'Tech', kind: 'system', sourceKey: 'techStatus', order: 6, filterable: true },
+  { key: 'fiopOwner', mode: 'corridor', label: 'FI Owner', kind: 'system', sourceKey: 'fiopOwner', order: 7, filterable: true },
+  { key: 'fiopTrackingLatest', mode: 'corridor', label: 'FIOP Tracking', kind: 'system', sourceKey: 'fiopTrackingLatest', order: 8, filterable: false },
+  { key: 'cooperationModel', mode: 'corridor', label: 'Cooperation', kind: 'system', sourceKey: 'cooperationModel', order: 9, filterable: true },
+  { key: 'merchantGeo', mode: 'corridor', label: 'Merchant Geo Allowed', kind: 'system', sourceKey: 'merchantGeo', order: 10, filterable: true },
+  { key: 'supportedProducts', mode: 'corridor', label: 'Supported Products', kind: 'system', sourceKey: 'supportedProducts', order: 11, filterable: true },
+  { key: 'createdAt', mode: 'corridor', label: 'Creation Time', kind: 'system', sourceKey: 'createdAt', order: 12, filterable: false },
+  { key: 'lastModifiedAt', mode: 'corridor', label: 'Last Update Time', kind: 'system', sourceKey: 'lastModifiedAt', order: 13, filterable: false },
 ];
 
 const toStartCase = (value: string) => value.replace(/([A-Z])/g, ' $1').replace(/^./, (char) => char.toUpperCase());
@@ -463,6 +471,8 @@ const createHistoryEntry = (entry?: any) => ({
   date: entry?.date || null,
   user: entry?.user || null,
   notes: entry?.notes || null,
+  proposalId: entry?.proposalId || null,
+  proposalName: entry?.proposalName || null,
 });
 
 const createSubmissionHistory = (entries: any = {}) => ({
@@ -476,8 +486,36 @@ const createSubmissionHistory = (entries: any = {}) => ({
 
 const pricingScheduleSuccessStates = new Set(['completed', 'approved', 'signed']);
 const pricingScheduleInReviewStates = new Set(['in review', 'under review', 'in progress', 'pending']);
+const pricingScheduleChangesRequestedStates = new Set(['changes requested', 'request changes', 'changes_request']);
 
 const normalizeStatusLabel = (value: unknown) => String(value ?? '').trim();
+
+export type PricingApprovalHistoryType = 'submit' | 'approve' | 'request_changes';
+export type PricingApprovalQueueTab = 'pending' | 'changes_requested' | 'approved';
+
+export interface PricingApprovalHistoryEntry {
+  type: PricingApprovalHistoryType;
+  time: string;
+  user: string;
+  note?: string;
+}
+
+export interface PricingApprovalQueueRow {
+  id: string;
+  channel: any;
+  proposalId: string;
+  corridorName: string;
+  quotationName: string;
+  cooperationMode: string;
+  fiOwner: string;
+  submittedAt: string;
+  status: string;
+  queueTab: PricingApprovalQueueTab;
+  latestActionAt: string;
+  latestActionUser: string;
+  latestActionNote: string;
+  paymentMethodCount: number;
+}
 
 export const isCompletedWorkflowState = (value: unknown) => (
   pricingScheduleSuccessStates.has(normalizeStatusLabel(value).toLowerCase())
@@ -486,6 +524,116 @@ export const isCompletedWorkflowState = (value: unknown) => (
 export const normalizePricingProposalApprovalStatus = (proposal: any, fallbackStatus?: string) => (
   normalizeStatusLabel(proposal?.approvalStatus || fallbackStatus) || 'Not Started'
 );
+
+export const getPricingApprovalQueueTab = (value: unknown): PricingApprovalQueueTab | null => {
+  const normalized = normalizeStatusLabel(value).toLowerCase();
+  if (pricingScheduleInReviewStates.has(normalized)) return 'pending';
+  if (pricingScheduleChangesRequestedStates.has(normalized)) return 'changes_requested';
+  if (pricingScheduleSuccessStates.has(normalized)) return 'approved';
+  return null;
+};
+
+const normalizePricingApprovalHistoryType = (value: unknown): PricingApprovalHistoryType | null => {
+  const normalized = normalizeStatusLabel(value).toLowerCase();
+  if (normalized === 'submit') return 'submit';
+  if (normalized === 'approve') return 'approve';
+  if (normalized === 'request_changes' || normalized === 'request changes' || normalized === 'changes requested') {
+    return 'request_changes';
+  }
+  return null;
+};
+
+const resolveApprovalHistoryTimestamp = (value?: string | null) => {
+  if (!value) return 0;
+  const parsed = new Date(value).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+const resolveMigratedPricingHistoryTarget = (
+  pricingProposals: any[] = [],
+  pricingHistory: any,
+) => {
+  if (!pricingHistory?.date) return null;
+  if (pricingHistory?.proposalId) return pricingHistory.proposalId;
+
+  if (pricingProposals.length === 1) {
+    return pricingProposals[0]?.id || null;
+  }
+
+  const proposalsWithWorkflow = pricingProposals.filter((proposal) => {
+    const status = normalizePricingProposalApprovalStatus(proposal).toLowerCase();
+    return pricingScheduleInReviewStates.has(status)
+      || pricingScheduleSuccessStates.has(status)
+      || pricingScheduleChangesRequestedStates.has(status);
+  });
+
+  return proposalsWithWorkflow.length === 1 ? proposalsWithWorkflow[0]?.id || null : null;
+};
+
+const resolveMigratedPricingApprovalHistoryType = (
+  normalizedStatus: unknown,
+): PricingApprovalHistoryType => {
+  const queueTab = getPricingApprovalQueueTab(normalizedStatus);
+  if (queueTab === 'approved') return 'approve';
+  if (queueTab === 'changes_requested') return 'request_changes';
+  return 'submit';
+};
+
+const normalizePricingApprovalHistory = (
+  proposal: any,
+  migratedProposalId: string | null,
+  pricingHistory: any,
+  normalizedStatus: string,
+): PricingApprovalHistoryEntry[] => {
+  const approvalHistory = Array.isArray(proposal?.approvalHistory)
+    ? proposal.approvalHistory as any[]
+    : [];
+  const normalizedEntries = approvalHistory.length
+    ? approvalHistory.reduce<PricingApprovalHistoryEntry[]>((entries: PricingApprovalHistoryEntry[], entry: any) => {
+        const type = normalizePricingApprovalHistoryType(entry?.type);
+        const time = String(entry?.time || '').trim();
+        if (!type || !time) return entries;
+
+        entries.push({
+          type,
+          time,
+          user: String(entry?.user || 'Current User').trim() || 'Current User',
+          note: String(entry?.note || '').trim(),
+        });
+        return entries;
+      }, [])
+    : [];
+
+  if (normalizedEntries.length > 0) {
+    return [...normalizedEntries].sort((left, right) => (
+      resolveApprovalHistoryTimestamp(left.time) - resolveApprovalHistoryTimestamp(right.time)
+    ));
+  }
+
+  if (pricingHistory?.date && proposal?.id && proposal.id === migratedProposalId) {
+    return [{
+      type: resolveMigratedPricingApprovalHistoryType(normalizedStatus),
+      time: pricingHistory.date,
+      user: pricingHistory.user || 'System',
+      note: pricingHistory.notes || '',
+    }];
+  }
+
+  return [];
+};
+
+export const getLatestPricingApprovalHistoryEvent = (
+  proposal: any,
+  type?: PricingApprovalHistoryType,
+) => {
+  const history = Array.isArray(proposal?.approvalHistory) ? proposal.approvalHistory : [];
+  const filteredHistory = type ? history.filter((entry: PricingApprovalHistoryEntry) => entry.type === type) : history;
+  if (!filteredHistory.length) return null;
+
+  return [...filteredHistory].sort((left, right) => (
+    resolveApprovalHistoryTimestamp(right.time) - resolveApprovalHistoryTimestamp(left.time)
+  ))[0];
+};
 
 export const buildPricingScheduleSummary = (pricingProposals: any[] = []) => {
   if (!Array.isArray(pricingProposals) || pricingProposals.length === 0) {
@@ -498,15 +646,18 @@ export const buildPricingScheduleSummary = (pricingProposals: any[] = []) => {
       accumulator.approved += 1;
     } else if (pricingScheduleInReviewStates.has(status)) {
       accumulator.inReview += 1;
+    } else if (pricingScheduleChangesRequestedStates.has(status)) {
+      accumulator.changesRequested += 1;
     } else {
       accumulator.notStarted += 1;
     }
     return accumulator;
-  }, { approved: 0, inReview: 0, notStarted: 0 });
+  }, { approved: 0, inReview: 0, changesRequested: 0, notStarted: 0 });
 
   return [
     summary.approved ? `${summary.approved} Approved` : '',
     summary.inReview ? `${summary.inReview} In Review` : '',
+    summary.changesRequested ? `${summary.changesRequested} Changes Requested` : '',
     summary.notStarted ? `${summary.notStarted} Not Started` : '',
   ].filter(Boolean).join(' / ');
 };
@@ -528,7 +679,21 @@ const aggregatePricingProposalStatus = (pricingProposals: any[] = []) => {
     return 'Approved';
   }
 
+  if (normalizedStatuses.some((status) => pricingScheduleChangesRequestedStates.has(status))) {
+    return 'Changes Requested';
+  }
+
   return 'Not Started';
+};
+
+const resolvePricingProposalStatus = (channel: any, pricingProposals: any[] = []) => {
+  if (pricingProposals.length > 0) {
+    return aggregatePricingProposalStatus(pricingProposals);
+  }
+
+  return normalizeWorkflowStatusLabel(
+    channel?.pricingProposalStatus || channel?.globalProgress?.pricing,
+  );
 };
 
 const normalizeFiopTrackingEntries = (entries: any[] = []) => {
@@ -561,14 +726,39 @@ export const withChannelDefaults = (channel: any) => {
   const corridorOnboarding = getChannelOnboardingWorkflow(channel, 'corridor');
   const wooshpayOnboardingStatus = getOnboardingStatusLabel('wooshpay', wooshpayOnboarding.status);
   const corridorOnboardingStatus = getOnboardingStatusLabel('corridor', corridorOnboarding.status);
-  const pricingProposals = Array.isArray(channel.pricingProposals)
-    ? channel.pricingProposals.map((proposal: any) => ({
-        ...proposal,
-        approvalStatus: normalizePricingProposalApprovalStatus(proposal, channel.pricingProposalStatus),
-        paymentMethods: normalizeProposalPaymentMethods(proposal.paymentMethods),
-      }))
-    : [];
-  const aggregatedPricingStatus = aggregatePricingProposalStatus(pricingProposals);
+  const complianceStatusKey = getAggregatedOnboardingStatusKey([
+    wooshpayOnboarding.status,
+    corridorOnboarding.status,
+  ]);
+  const complianceStatus = getAggregatedOnboardingStatusLabel([
+    wooshpayOnboarding.status,
+    corridorOnboarding.status,
+  ]);
+  const rawPricingProposals = Array.isArray(channel.pricingProposals) ? channel.pricingProposals : [];
+  const sharedPricingHistory = createHistoryEntry((channel.submissionHistory || {}).pricing);
+  const migratedPricingProposalId = resolveMigratedPricingHistoryTarget(rawPricingProposals, sharedPricingHistory);
+  const pricingProposals = rawPricingProposals.map((proposal: any) => {
+    const normalizedApprovalStatus = normalizePricingProposalApprovalStatus(proposal, channel.pricingProposalStatus);
+    return {
+      ...proposal,
+      approvalStatus: normalizedApprovalStatus,
+      paymentMethods: normalizeProposalPaymentMethods(proposal.paymentMethods),
+      approvalHistory: normalizePricingApprovalHistory(
+        proposal,
+        migratedPricingProposalId,
+        sharedPricingHistory,
+        normalizedApprovalStatus,
+      ),
+    };
+  });
+  const ndaLegalRequestData = getLegalRequestPacket(channel, 'NDA');
+  const msaLegalRequestData = getLegalRequestPacket(channel, 'MSA');
+  const ndaLegalStatusHistory = getLegalStatusHistory(channel, 'NDA');
+  const msaLegalStatusHistory = getLegalStatusHistory(channel, 'MSA');
+  const ndaStatus = normalizeNdaStatusLabel(channel.ndaStatus || channel.globalProgress?.nda);
+  const contractStatus = normalizeMsaStatusLabel(channel.contractStatus || channel.globalProgress?.contract);
+  const pricingProposalStatus = resolvePricingProposalStatus(channel, pricingProposals);
+  const techStatus = normalizeWorkflowStatusLabel(channel.techStatus || channel.globalProgress?.tech);
 
   return {
     ...channel,
@@ -583,24 +773,98 @@ export const withChannelDefaults = (channel: any) => {
     corridorOnboarding,
     wooshpayOnboardingStatus,
     corridorOnboardingStatus,
-    complianceStatus: corridorOnboardingStatus,
+    complianceStatus,
+    complianceStatusKey,
     submissionHistory: createSubmissionHistory({
       ...(channel.submissionHistory || {}),
       cdd: buildOnboardingHistoryEntry('corridor', corridorOnboarding),
       kyc: buildOnboardingHistoryEntry('wooshpay', wooshpayOnboarding),
+      nda: buildLegalSubmissionHistoryEntry(channel, 'NDA', ndaLegalStatusHistory),
+      msa: buildLegalSubmissionHistoryEntry(channel, 'MSA', msaLegalStatusHistory),
     }),
+    legalRequestData: {
+      ...(channel.legalRequestData || {}),
+      nda: ndaLegalRequestData,
+      msa: msaLegalRequestData,
+    },
+    legalStatusHistory: {
+      ...(channel.legalStatusHistory || {}),
+      nda: ndaLegalStatusHistory,
+      msa: msaLegalStatusHistory,
+    },
+    ndaStatus,
+    contractStatus,
     pricingProposals,
-    pricingProposalStatus: aggregatedPricingStatus,
+    pricingProposalStatus,
+    techStatus,
     globalProgress: {
       ...(channel.globalProgress || {}),
       kyc: wooshpayOnboardingStatus,
-      pricing: aggregatedPricingStatus,
+      nda: ndaStatus,
+      contract: contractStatus,
+      pricing: pricingProposalStatus,
+      tech: techStatus,
     },
     fiopTrackingEntries,
     fiopTrackingLatestTime: latestTracking?.time || '',
     fiopTrackingLatest: latestTracking ? `${latestTracking.time} ${latestTracking.remark}` : '',
   };
 };
+
+export const buildPricingApprovalQueueRows = (channels: any[] = []): PricingApprovalQueueRow[] => (
+  channels.reduce<PricingApprovalQueueRow[]>((rows, channel) => {
+    const proposals = Array.isArray(channel?.pricingProposals) ? channel.pricingProposals : [];
+    proposals.forEach((proposal: any) => {
+      const normalizedStatus = normalizePricingProposalApprovalStatus(proposal, channel?.pricingProposalStatus);
+      const queueTab = getPricingApprovalQueueTab(normalizedStatus);
+      if (!queueTab) return;
+
+      const latestSubmitEvent = getLatestPricingApprovalHistoryEvent(proposal, 'submit');
+      const latestReviewEvent = queueTab === 'approved'
+        ? getLatestPricingApprovalHistoryEvent(proposal, 'approve')
+        : queueTab === 'changes_requested'
+          ? getLatestPricingApprovalHistoryEvent(proposal, 'request_changes')
+          : latestSubmitEvent;
+      const fallbackEvent = latestReviewEvent
+        || latestSubmitEvent
+        || {
+          time: proposal?.updatedAt || channel?.lastModifiedAt || '',
+          user: queueTab === 'pending' ? (channel?.fiopOwner || 'Current User') : 'System',
+          note: '',
+        };
+      const submittedAt = latestSubmitEvent?.time || proposal?.updatedAt || channel?.lastModifiedAt || '';
+      const latestActionAt = queueTab === 'pending'
+        ? submittedAt
+        : (latestReviewEvent?.time || fallbackEvent.time || submittedAt);
+      if (!latestActionAt) return;
+
+      rows.push({
+        id: `${channel.id}-${proposal.id}`,
+        channel,
+        proposalId: proposal.id,
+        corridorName: channel.channelName || 'Unnamed Corridor',
+        quotationName: proposal.customProposalType || 'Pricing Schedule',
+        cooperationMode: proposal.mode || 'N/A',
+        fiOwner: channel.fiopOwner || 'Unassigned',
+        submittedAt,
+        status: normalizedStatus,
+        queueTab,
+        latestActionAt,
+        latestActionUser: queueTab === 'pending'
+          ? (latestSubmitEvent?.user || fallbackEvent.user || channel?.fiopOwner || 'Current User')
+          : (latestReviewEvent?.user || fallbackEvent.user || 'System'),
+        latestActionNote: queueTab === 'pending'
+          ? (latestSubmitEvent?.note || '')
+          : (latestReviewEvent?.note || fallbackEvent.note || ''),
+        paymentMethodCount: Array.isArray(proposal.paymentMethods) ? proposal.paymentMethods.length : 0,
+      });
+    });
+
+    return rows;
+  }, []).sort((left, right) => (
+    resolveApprovalHistoryTimestamp(right.latestActionAt) - resolveApprovalHistoryTimestamp(left.latestActionAt)
+  ))
+);
 
 export const createTechStepsData = (variant = 'notStarted') => {
   const steps = [
@@ -757,7 +1021,7 @@ const rawInitialChannels = [
           eventType: 'submission',
           title: 'Corridor onboarding package submitted',
           remark: 'Existing APAC diligence pack reused from the regional approval baseline.',
-          status: 'counterparty_reviewing',
+          status: 'self_preparation',
           time: '2026-03-05 10:00:00',
           actorName: 'Bob',
           actorRole: 'submitter',
@@ -916,7 +1180,7 @@ const rawInitialChannels = [
       nda: { date: '2026-03-12', user: 'Legal Team', notes: 'Redline returned; signature paused.' },
     }),
     wooshpayOnboarding: {
-      status: 'counterparty_reviewing',
+      status: 'self_preparation',
       submission: {
         entities: ['Steelhenge Pte Ltd (Singapore)'],
         documentLink: 'https://drive.example.com/dlocal/wooshpay-v1',
@@ -933,7 +1197,7 @@ const rawInitialChannels = [
           eventType: 'submission',
           title: 'WooshPay onboarding package submitted',
           remark: 'Initial WooshPay package submitted for LatAm onboarding.',
-          status: 'counterparty_reviewing',
+          status: 'self_preparation',
           time: '2026-03-10 09:30:00',
           actorName: 'Bob',
           actorRole: 'submitter',
@@ -960,8 +1224,8 @@ const rawInitialChannels = [
         {
           id: 'dlocal-corridor-request-1',
           eventType: 'request_changes',
-          title: 'Corridor onboarding needs FI input',
-          remark: 'Need FI input: please confirm the latest fallback payout contact and escalation path.',
+          title: 'Status updated to Corridor preparation',
+          remark: 'Please confirm the latest fallback payout contact and escalation path.',
           status: 'self_preparation',
           time: '2026-03-17 17:25:00',
           actorName: 'Compliance User',
@@ -973,7 +1237,7 @@ const rawInitialChannels = [
           eventType: 'submission',
           title: 'Corridor onboarding package submitted',
           remark: 'Primary corridor ops contact for settlement controls follow-up and fallback payout routing.',
-          status: 'counterparty_reviewing',
+          status: 'self_preparation',
           time: '2026-03-11 14:10:00',
           actorName: 'Bob',
           actorRole: 'submitter',

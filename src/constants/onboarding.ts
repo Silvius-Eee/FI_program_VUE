@@ -11,8 +11,14 @@ export const ONBOARDING_STATUS_KEYS = [
 ] as const;
 
 export type OnboardingStatusKey = typeof ONBOARDING_STATUS_KEYS[number];
+export const COMPLIANCE_VISIBLE_ONBOARDING_STATUS_KEYS = [
+  'completed',
+  'no_need',
+  'self_preparation',
+  'counterparty_reviewing',
+] as const satisfies readonly OnboardingStatusKey[];
 
-export const ONBOARDING_QUEUE_TABS = ['in_progress', 'need_fi_input', 'done'] as const;
+export const ONBOARDING_QUEUE_TABS = ['reviewing', 'preparation', 'completed', 'no_need'] as const;
 
 export type OnboardingQueueTab = typeof ONBOARDING_QUEUE_TABS[number];
 
@@ -113,14 +119,14 @@ type LegacyHistoryEntry = {
 const onboardingTrackMeta = {
   wooshpay: {
     title: 'WooshPay onboarding',
-    selfPreparationLabel: 'WooshPay Preparation',
-    counterpartyReviewingLabel: 'Corridor Reviewing',
+    selfPreparationLabel: 'WooshPay preparation',
+    counterpartyReviewingLabel: 'Corridor reviewing',
     legacyFieldKey: 'wooshpayOnboarding',
   },
   corridor: {
     title: 'Corridor onboarding',
-    selfPreparationLabel: 'Corridor Preparation',
-    counterpartyReviewingLabel: 'WooshPay Reviewing',
+    selfPreparationLabel: 'Corridor preparation',
+    counterpartyReviewingLabel: 'WooshPay reviewing',
     legacyFieldKey: 'corridorOnboarding',
   },
 } as const;
@@ -233,9 +239,111 @@ export const getOnboardingStatusLabel = (
   const normalizedStatus = normalizeOnboardingStatusKey(status, track);
   if (normalizedStatus === 'completed') return 'Completed';
   if (normalizedStatus === 'no_need') return 'No Need';
-  if (normalizedStatus === 'self_preparation') return 'Need FI Input';
-  if (normalizedStatus === 'counterparty_reviewing') return 'In Progress';
+  if (normalizedStatus === 'self_preparation') return onboardingTrackMeta[track].selfPreparationLabel;
+  if (normalizedStatus === 'counterparty_reviewing') return onboardingTrackMeta[track].counterpartyReviewingLabel;
   return 'Not Started';
+};
+
+export const getOnboardingQueueTabLabel = (
+  track: OnboardingTrack,
+  queueTab: OnboardingQueueTab,
+) => {
+  if (queueTab === 'reviewing') return onboardingTrackMeta[track].counterpartyReviewingLabel;
+  if (queueTab === 'preparation') return onboardingTrackMeta[track].selfPreparationLabel;
+  if (queueTab === 'completed') return 'Completed';
+  return 'No Need';
+};
+
+export const getComplianceVisibleOnboardingStatuses = () => (
+  [...COMPLIANCE_VISIBLE_ONBOARDING_STATUS_KEYS]
+);
+
+export const getAggregatedOnboardingStatusKey = (
+  statuses: Array<OnboardingStatusKey | string | null | undefined>,
+): OnboardingStatusKey => {
+  const normalizedStatuses = statuses.map((status) => normalizeOnboardingStatusKey(status));
+
+  if (normalizedStatuses.some((status) => status === 'not_started')) return 'not_started';
+  if (normalizedStatuses.some((status) => status === 'self_preparation')) return 'self_preparation';
+  if (normalizedStatuses.some((status) => status === 'counterparty_reviewing')) return 'counterparty_reviewing';
+  if (normalizedStatuses.every((status) => status === 'no_need')) return 'no_need';
+  if (normalizedStatuses.some((status) => status === 'completed')) return 'completed';
+  return normalizedStatuses[0] || 'not_started';
+};
+
+export const getAggregatedOnboardingStatusLabel = (
+  statuses: Array<OnboardingStatusKey | string | null | undefined>,
+) => getOnboardingStatusLabel('corridor', getAggregatedOnboardingStatusKey(statuses));
+
+export interface KycOverviewAggregate {
+  displayStatus: string;
+  driverTrack: OnboardingTrack;
+  driverUpdatedAt: string;
+  isTerminal: boolean;
+}
+
+interface KycOverviewDriverState {
+  track: OnboardingTrack;
+  status: OnboardingStatusKey;
+  updatedAt: string;
+}
+
+const KYC_OVERVIEW_STATUS_RANK: Record<OnboardingStatusKey, number> = {
+  not_started: 0,
+  self_preparation: 1,
+  counterparty_reviewing: 2,
+  completed: 3,
+  no_need: 3,
+};
+
+const isTerminalOnboardingStatus = (status: OnboardingStatusKey) => (
+  status === 'completed' || status === 'no_need'
+);
+
+export const getKycOverviewAggregate = (channel: any): KycOverviewAggregate => {
+  const corridorWorkflow = getChannelOnboardingWorkflow(channel, 'corridor');
+  const wooshpayWorkflow = getChannelOnboardingWorkflow(channel, 'wooshpay');
+  const corridorState: KycOverviewDriverState = {
+    track: 'corridor',
+    status: corridorWorkflow.status,
+    updatedAt: corridorWorkflow.lastUpdatedAt,
+  };
+  const wooshpayState: KycOverviewDriverState = {
+    track: 'wooshpay',
+    status: wooshpayWorkflow.status,
+    updatedAt: wooshpayWorkflow.lastUpdatedAt,
+  };
+  const states: KycOverviewDriverState[] = [corridorState, wooshpayState];
+  const isTerminal = states.every(({ status }) => isTerminalOnboardingStatus(status));
+
+  let driverState: KycOverviewDriverState = corridorState;
+  let displayStatus = 'Not Started';
+
+  if (isTerminal) {
+    const allNoNeed = states.every(({ status }) => status === 'no_need');
+    const completedState = states.find(({ status }) => status === 'completed');
+
+    if (allNoNeed) {
+      displayStatus = 'No Need';
+    } else {
+      displayStatus = 'Completed';
+      if (completedState && states.some(({ status }) => status === 'no_need')) {
+        driverState = completedState;
+      }
+    }
+  } else {
+    const corridorRank = KYC_OVERVIEW_STATUS_RANK[corridorState.status];
+    const wooshpayRank = KYC_OVERVIEW_STATUS_RANK[wooshpayState.status];
+    driverState = wooshpayRank < corridorRank ? wooshpayState : corridorState;
+    displayStatus = getOnboardingStatusLabel(driverState.track, driverState.status);
+  }
+
+  return {
+    displayStatus,
+    driverTrack: driverState.track,
+    driverUpdatedAt: driverState.updatedAt,
+    isTerminal,
+  };
 };
 
 export const getOnboardingStatusTheme = (status: OnboardingStatusKey | string | null | undefined) => (
@@ -350,6 +458,8 @@ export const normalizeOnboardingStatusHistory = (
     .sort((left, right) => getTimestampValue(right.updatedAt) - getTimestampValue(left.updatedAt));
 };
 
+const LEGACY_AUTO_SUBMISSION_STATUS_REMARK = 'Auto-updated after package submission.';
+
 const normalizeOnboardingActivityEventType = (value: unknown): OnboardingActivityEventType => {
   const normalized = normalizeText(value).toLowerCase();
   if (
@@ -366,6 +476,30 @@ const normalizeOnboardingActivityEventType = (value: unknown): OnboardingActivit
   return 'note';
 };
 
+const isSubmissionActivityEvent = (eventType: OnboardingActivityEventType) => (
+  eventType === 'submission' || eventType === 'resubmission'
+);
+
+const isLegacyAutoSubmissionStatus = (
+  status: OnboardingStatusKey,
+  remark: string,
+  time: string,
+  actorName: string,
+  submission: OnboardingSubmission,
+) => {
+  if (status !== 'counterparty_reviewing') return false;
+  if (remark !== LEGACY_AUTO_SUBMISSION_STATUS_REMARK) return false;
+
+  const submittedAt = normalizeTimestamp(submission.submittedAt);
+  const submittedBy = normalizeText(submission.submittedBy);
+  if (!submittedAt || !submittedBy) return false;
+
+  return (
+    getTimestampValue(time) === getTimestampValue(submittedAt)
+    && normalizeText(actorName) === submittedBy
+  );
+};
+
 const buildDefaultActivityTitle = (
   track: OnboardingTrack,
   eventType: OnboardingActivityEventType,
@@ -373,7 +507,7 @@ const buildDefaultActivityTitle = (
 ) => {
   if (eventType === 'submission') return `${getOnboardingTrackTitle(track)} package submitted`;
   if (eventType === 'resubmission') return `${getOnboardingTrackTitle(track)} package resubmitted`;
-  if (eventType === 'request_changes') return `${getOnboardingTrackTitle(track)} needs FI input`;
+  if (eventType === 'request_changes') return `Status updated to ${getOnboardingStatusLabel(track, 'self_preparation')}`;
   if (eventType === 'approval') return `${getOnboardingTrackTitle(track)} completed`;
   if (eventType === 'status_change') return `Status updated to ${getOnboardingStatusLabel(track, status)}`;
   return `${getOnboardingTrackTitle(track)} note added`;
@@ -389,9 +523,9 @@ const createActivityEntryFromSubmission = (
   return {
     id: buildActivityHistoryId(),
     eventType,
-    title: buildDefaultActivityTitle(track, eventType, 'counterparty_reviewing'),
-    remark: submission.notes,
-    status: 'counterparty_reviewing',
+    title: buildDefaultActivityTitle(track, eventType, 'self_preparation'),
+    remark: submission.handoffNote || submission.notes,
+    status: 'self_preparation',
     time: submission.submittedAt,
     actorName: submission.submittedBy,
     actorRole: 'submitter',
@@ -496,13 +630,51 @@ export const normalizeOnboardingWorkflow = (
 ): OnboardingWorkflow => {
   const candidate = value && typeof value === 'object' ? value as Record<string, unknown> : {};
   const submission = normalizeOnboardingSubmission(candidate.submission, track, legacyHistory);
-  const statusHistory = normalizeOnboardingStatusHistory(candidate.statusHistory, track);
-  const activityHistory = normalizeOnboardingActivityHistory(candidate.activityHistory, track, submission, statusHistory);
+  const statusHistory = normalizeOnboardingStatusHistory(candidate.statusHistory, track)
+    .map((entry) => (
+      isLegacyAutoSubmissionStatus(entry.status, entry.remark, entry.updatedAt, entry.updatedBy, submission)
+        ? { ...entry, status: 'self_preparation' as OnboardingStatusKey }
+        : entry
+    ));
+  const activityHistory = normalizeOnboardingActivityHistory(candidate.activityHistory, track, submission, statusHistory)
+    .map((entry) => {
+      const isLegacySubmissionEvent = (
+        entry.status === 'counterparty_reviewing'
+        && isSubmissionActivityEvent(entry.eventType)
+        && normalizeText(entry.actorRole) !== 'reviewer'
+      );
+      const isLegacyAutoStatusEvent = isLegacyAutoSubmissionStatus(
+        entry.status,
+        entry.remark,
+        entry.time,
+        entry.actorName,
+        submission,
+      );
+
+      if (!isLegacySubmissionEvent && !isLegacyAutoStatusEvent) {
+        return entry;
+      }
+
+      return {
+        ...entry,
+        status: 'self_preparation' as OnboardingStatusKey,
+        title: buildDefaultActivityTitle(track, entry.eventType, 'self_preparation'),
+      };
+    });
   const fallbackStatus = candidate.status ?? legacyStatus;
   let status = normalizeOnboardingStatusKey(fallbackStatus, track);
 
   if (status === 'not_started' && hasOnboardingSubmission(submission)) {
-    status = 'counterparty_reviewing';
+    status = 'self_preparation';
+  }
+
+  const hasReviewerManagedActivity = activityHistory.some((entry) => {
+    if (normalizeText(entry.actorRole) !== 'reviewer') return false;
+    return !isLegacyAutoSubmissionStatus(entry.status, entry.remark, entry.time, entry.actorName, submission);
+  });
+
+  if (status === 'counterparty_reviewing' && hasOnboardingSubmission(submission) && !hasReviewerManagedActivity) {
+    status = 'self_preparation';
   }
 
   const lastUpdatedAt = normalizeTimestamp(candidate.lastUpdatedAt)
@@ -608,16 +780,16 @@ export const applyOnboardingSubmission = (
 ) => {
   const fieldKey = getOnboardingTrackFieldKey(track);
   const currentWorkflow = getWorkflowFromChannel(channel, track);
-  const hadSubmission = hasOnboardingSubmission(currentWorkflow.submission);
+  const currentVersion = getOnboardingCurrentVersion(track, currentWorkflow);
+  const isFirstSubmission = currentVersion === 0;
+  const hadSubmission = !isFirstSubmission;
   const submission = normalizeOnboardingSubmission({
     ...currentWorkflow.submission,
     ...payload,
     submittedAt: timestamp,
     submittedBy: actor,
   }, track);
-  const nextStatus = (currentWorkflow.status === 'not_started' || currentWorkflow.status === 'self_preparation')
-    ? 'counterparty_reviewing'
-    : currentWorkflow.status;
+  const nextStatus = isFirstSubmission ? 'self_preparation' : currentWorkflow.status;
   const nextHistory = currentWorkflow.status !== nextStatus
     ? [
         createOnboardingStatusHistoryEntry(track, nextStatus, 'Auto-updated after package submission.', timestamp, actor),
@@ -628,7 +800,7 @@ export const applyOnboardingSubmission = (
     track,
     hadSubmission ? 'resubmission' : 'submission',
     nextStatus,
-    submission.notes,
+    submission.handoffNote || submission.notes,
     timestamp,
     actor,
     'submitter',
@@ -659,7 +831,7 @@ const resolveActivityEventTypeByStatus = (status: OnboardingStatusKey): Onboardi
 
 const buildActivityTitleByStatus = (track: OnboardingTrack, status: OnboardingStatusKey) => {
   if (status === 'completed') return `${getOnboardingTrackTitle(track)} completed`;
-  if (status === 'self_preparation') return `${getOnboardingTrackTitle(track)} needs FI input`;
+  if (status === 'self_preparation') return `Status updated to ${getOnboardingStatusLabel(track, status)}`;
   if (status === 'no_need') return `${getOnboardingTrackTitle(track)} marked as no need`;
   return `Status updated to ${getOnboardingStatusLabel(track, status)}`;
 };
@@ -703,9 +875,10 @@ export const applyOnboardingStatusUpdate = (
 
 export const getOnboardingQueueTab = (status: OnboardingStatusKey | string | null | undefined): OnboardingQueueTab | null => {
   const normalizedStatus = normalizeOnboardingStatusKey(status);
-  if (normalizedStatus === 'counterparty_reviewing') return 'in_progress';
-  if (normalizedStatus === 'self_preparation') return 'need_fi_input';
-  if (normalizedStatus === 'completed' || normalizedStatus === 'no_need') return 'done';
+  if (normalizedStatus === 'counterparty_reviewing') return 'reviewing';
+  if (normalizedStatus === 'self_preparation') return 'preparation';
+  if (normalizedStatus === 'completed') return 'completed';
+  if (normalizedStatus === 'no_need') return 'no_need';
   return null;
 };
 
@@ -747,13 +920,17 @@ export const getLatestOnboardingReviewerNote = (
   return normalizedWorkflow.submission.handoffNote || normalizedWorkflow.submission.notes || '';
 };
 
+export const getOnboardingTimelineEvents = (
+  track: OnboardingTrack,
+  workflow?: Partial<OnboardingWorkflow> | null,
+) => normalizeOnboardingWorkflow(track, workflow).activityHistory;
+
 export const getRecentOnboardingMilestones = (
   track: OnboardingTrack,
   workflow?: Partial<OnboardingWorkflow> | null,
   limit = 4,
 ) => {
-  const normalizedWorkflow = normalizeOnboardingWorkflow(track, workflow);
-  return normalizedWorkflow.activityHistory.slice(0, Math.max(limit, 0));
+  return getOnboardingTimelineEvents(track, workflow).slice(0, Math.max(limit, 0));
 };
 
 export const getLatestOnboardingDecisionEvent = (
@@ -805,9 +982,14 @@ export const buildOnboardingQueueRow = (
   const latestSubmissionEvent = getLatestOnboardingSubmissionEvent(track, workflow);
   const latestReviewerEvent = getLatestOnboardingReviewerEvent(track, workflow);
   const latestDecisionEvent = getLatestOnboardingDecisionEvent(track, workflow);
+  const latestSharedNoteEvent = workflow.activityHistory.find((entry) => entry.remark) || null;
   const latestRequestChangesEvent = workflow.activityHistory.find((entry) => entry.eventType === 'request_changes') || null;
+  const latestSelfPreparationStatusEntry = workflow.statusHistory.find((entry) => entry.status === 'self_preparation') || null;
+  const latestSelfPreparationEvent = workflow.activityHistory.find((entry) => entry.status === 'self_preparation') || null;
   const latestReviewerNote = getLatestOnboardingReviewerNote(track, workflow);
-  const finalStatus = queueTab === 'done' ? getOnboardingStatusLabel(track, workflow.status) : '';
+  const finalStatus = ['completed', 'no_need'].includes(queueTab)
+    ? getOnboardingStatusLabel(track, workflow.status)
+    : '';
 
   return {
     id: `${String(channel?.id ?? '')}:${track}`,
@@ -821,17 +1003,17 @@ export const buildOnboardingQueueRow = (
     attachmentCount: workflow.submission.attachments.length,
     latestSubmissionAt: latestSubmissionEvent?.time || workflow.submission.submittedAt || '',
     submittedBy: latestSubmissionEvent?.actorName || workflow.submission.submittedBy || '',
-    latestNote: latestReviewerNote,
+    latestNote: latestSharedNoteEvent?.remark || latestReviewerNote,
     updatedAt: workflow.lastUpdatedAt || '',
     updatedBy: workflow.lastUpdatedBy || '',
-    needInputSince: latestRequestChangesEvent?.time || '',
-    requestNote: latestRequestChangesEvent?.remark || '',
+    needInputSince: latestSelfPreparationStatusEntry?.updatedAt || latestRequestChangesEvent?.time || '',
+    requestNote: latestRequestChangesEvent?.remark || latestSelfPreparationEvent?.remark || '',
     finalStatus,
-    waitingSince: latestRequestChangesEvent?.time || '',
+    waitingSince: latestSelfPreparationStatusEntry?.updatedAt || latestRequestChangesEvent?.time || '',
     latestReviewerNote: latestRequestChangesEvent?.remark || latestReviewerNote,
     lastReviewedAt: latestReviewerEvent?.time || '',
-    decidedAt: latestDecisionEvent?.time || (queueTab === 'done' ? workflow.lastUpdatedAt : ''),
-    decidedBy: latestDecisionEvent?.actorName || (queueTab === 'done' ? workflow.lastUpdatedBy : ''),
+    decidedAt: latestDecisionEvent?.time || (['completed', 'no_need'].includes(queueTab) ? workflow.lastUpdatedAt : ''),
+    decidedBy: latestDecisionEvent?.actorName || (['completed', 'no_need'].includes(queueTab) ? workflow.lastUpdatedBy : ''),
     finalDecision: finalStatus,
     totalReviewCycles: getOnboardingTotalReviewCycles(track, workflow),
     agingHours: getOnboardingAgingHours(track, workflow, nowValue),

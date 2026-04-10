@@ -118,7 +118,7 @@ const handleSubmit = () => {
     <div class="kyc-tabs-shell px-6 border-b border-slate-100/90">
       <a-tabs v-model:activeKey="activeKey" class="fitrem-tabs">
         <a-tab-pane key="submission" tab="Submission" />
-        <a-tab-pane key="history" tab="History & Approval" />
+        <a-tab-pane key="history" tab="History" />
       </a-tabs>
     </div>
 
@@ -130,7 +130,7 @@ const handleSubmit = () => {
               <div class="text-[12px] font-bold text-slate-400 tracking-[0.18em] uppercase">WooshPay onboarding</div>
               <h3 class="mt-2 mb-0 text-[22px] font-black text-slate-900 leading-tight">{{ props.channel.channelName || 'Unnamed Corridor' }}</h3>
               <p class="mt-2 mb-0 text-[13px] text-slate-500 font-medium leading-relaxed">
-                Submit the FIOP package that Compliance will review and track.
+                Choose the WooshPay-side entities, add the supporting package, and explain what Compliance should review.
               </p>
             </div>
             <span class="kyc-status-pill" :style="{ background: statusTheme.bg, color: statusTheme.text, borderColor: statusTheme.border }">
@@ -145,7 +145,7 @@ const handleSubmit = () => {
               <template #label>
                 <div class="kyc-label-row">
                   <span class="kyc-required-mark" aria-hidden="true">*</span>
-                  <span class="kyc-label-text">Select Contracting Entities (Wooshpay Side)</span>
+                  <span class="kyc-label-text">Which WooshPay entities are in scope</span>
                 </div>
               </template>
               <a-checkbox-group v-model:value="formState.entities" class="kyc-entity-group w-full">
@@ -166,7 +166,7 @@ const handleSubmit = () => {
           <div class="kyc-section-card">
             <a-form-item class="mb-0">
               <template #label>
-                <span class="kyc-label-text">KYC Package Attachments</span>
+                <span class="kyc-label-text">Supporting attachments</span>
               </template>
               <a-upload-dragger
                 class="kyc-upload-dragger mt-2"
@@ -186,7 +186,7 @@ const handleSubmit = () => {
                     </div>
                   </div>
                 </div>
-                <p class="kyc-upload-copy text-[15px] font-bold text-slate-800 mb-1">Upload the package provided to Compliance.</p>
+                <p class="kyc-upload-copy text-[15px] font-bold text-slate-800 mb-1">Upload the files Compliance should review.</p>
                 <p class="text-[12px] font-medium text-slate-400 mb-0">Files stay as local metadata in this prototype and can be reviewed from the workbench.</p>
               </a-upload-dragger>
 
@@ -210,7 +210,7 @@ const handleSubmit = () => {
           <div class="kyc-section-card">
             <a-form-item class="mb-0">
               <template #label>
-                <span class="kyc-label-text">Onboarding Document Link / Portal (Optional)</span>
+                <span class="kyc-label-text">Supporting link or portal (optional)</span>
               </template>
               <a-textarea
                 v-model:value="formState.documentLink"
@@ -226,13 +226,13 @@ const handleSubmit = () => {
               <template #label>
                 <div class="kyc-label-row">
                   <span class="kyc-required-mark" aria-hidden="true">*</span>
-                  <span class="kyc-label-text">Onboarding Requirement Details & Instructions</span>
+                  <span class="kyc-label-text">What Compliance should review</span>
                 </div>
               </template>
               <a-textarea
                 v-model:value="formState.notes"
                 :rows="4"
-                placeholder="Paste the material list or any specific instructions received via email or chat..."
+                placeholder="List the materials, exceptions, or instructions Compliance should read before reviewing this track."
                 class="kyc-textarea mt-2"
               />
             </a-form-item>

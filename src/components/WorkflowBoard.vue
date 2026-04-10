@@ -2,9 +2,19 @@
 import { computed } from 'vue';
 import {
   getChannelOnboardingWorkflow,
-  getLatestOnboardingReviewerNote,
-  getOnboardingStatusLabel,
+  getKycOverviewAggregate,
+  getOnboardingTrackTitle,
+  type OnboardingStatusKey,
 } from '../constants/onboarding';
+import {
+  getLatestLegalStatusEntry,
+  getMsaStatusTheme,
+  getNdaStatusTheme,
+  getWorkflowStatusTheme,
+  normalizeMsaStatusLabel,
+  normalizeNdaStatusLabel,
+  normalizeWorkflowStatusLabel,
+} from '../utils/workflowStatus';
 
 type HistoryEntry = {
   date: string | null;
@@ -13,7 +23,15 @@ type HistoryEntry = {
 };
 
 type WorkflowNodeKey = 'kyc' | 'nda' | 'msa' | 'pricing' | 'tech';
-type KycWorkflowPanelKey = 'kyc-cdd' | 'kyc-onboarding';
+type BoardNode = {
+  key: WorkflowNodeKey;
+  title: string;
+  state: string;
+  statusLabel: string;
+  history?: HistoryEntry;
+  detailText?: string;
+  themeKey?: OnboardingStatusKey;
+};
 
 const props = defineProps<{
   channel: any;
@@ -39,135 +57,189 @@ const props = defineProps<{
 
 const emit = defineEmits(['nodeClick']);
 
-const resolveHistoryEntryTimestamp = (value?: string | null) => {
-  if (!value) return 0;
-  const timestamp = new Date(value).getTime();
-  return Number.isNaN(timestamp) ? 0 : timestamp;
-};
+const kycOverview = computed(() => getKycOverviewAggregate(props.channel));
+const kycDriverWorkflow = computed(() => getChannelOnboardingWorkflow(props.channel, kycOverview.value.driverTrack));
+const kycThemeKey = computed<OnboardingStatusKey>(() => {
+  if (kycOverview.value.isTerminal) {
+    return kycOverview.value.displayStatus === 'No Need' ? 'no_need' : 'completed';
+  }
 
-const latestKycHistory = computed<HistoryEntry | undefined>(() => {
-  const entries = [props.submissionHistory?.cdd, props.submissionHistory?.kyc]
-    .filter((entry): entry is HistoryEntry => Boolean(entry?.date))
-    .sort((left, right) => resolveHistoryEntryTimestamp(right.date) - resolveHistoryEntryTimestamp(left.date));
-
-  return entries[0];
+  return kycDriverWorkflow.value.status;
+});
+const kycSummary = computed(() => (
+  kycOverview.value.isTerminal
+    ? 'Both onboarding tracks closed'
+    : `Driven by ${getOnboardingTrackTitle(kycOverview.value.driverTrack)}`
+));
+const kycHistory = computed<HistoryEntry | undefined>(() => (
+  kycOverview.value.driverUpdatedAt ? { date: kycOverview.value.driverUpdatedAt } : undefined
+));
+const ndaHistory = computed<HistoryEntry | undefined>(() => {
+  const latestEntry = getLatestLegalStatusEntry(props.channel, 'NDA');
+  if (!latestEntry) return props.submissionHistory?.nda;
+  return {
+    date: latestEntry.time,
+    user: latestEntry.actorName,
+    notes: latestEntry.note,
+  };
+});
+const msaHistory = computed<HistoryEntry | undefined>(() => {
+  const latestEntry = getLatestLegalStatusEntry(props.channel, 'MSA');
+  if (!latestEntry) return props.submissionHistory?.msa;
+  return {
+    date: latestEntry.time,
+    user: latestEntry.actorName,
+    notes: latestEntry.note,
+  };
 });
 
-const corridorOnboarding = computed(() => getChannelOnboardingWorkflow(props.channel, 'corridor'));
-const wooshpayOnboarding = computed(() => getChannelOnboardingWorkflow(props.channel, 'wooshpay'));
-const getKycTrackCtaLabel = (status: string) => {
-  if (status === 'not_started') return 'Start';
-  if (status === 'self_preparation') return 'Need Action';
-  if (status === 'counterparty_reviewing') return 'Add Supplement';
-  return '';
-};
-
-const kycAggregateState = computed(() => {
-  const statuses = [corridorOnboarding.value.status, wooshpayOnboarding.value.status];
-  const allFinished = statuses.every((status) => ['completed', 'no_need'].includes(status));
-  const allNoNeed = statuses.every((status) => status === 'no_need');
-  const allNotStarted = statuses.every((status) => status === 'not_started');
-  const hasOngoingStage = statuses.some((status) => ['self_preparation', 'counterparty_reviewing'].includes(status));
-
-  if (allNoNeed) return 'No need';
-  if (allFinished) return 'Completed';
-  if (allNotStarted) return 'Not Started';
-  if (hasOngoingStage || statuses.some((status) => status === 'completed')) return 'In Progress';
-
-  return 'Not Started';
-});
-
-const nodes = computed(() => [
+const nodes = computed<BoardNode[]>(() => [
   {
-    key: 'kyc' as WorkflowNodeKey,
+    key: 'kyc',
     title: 'KYC Verification',
-    state: kycAggregateState.value,
-    history: latestKycHistory.value,
-    checklist: [
-      {
-        label: 'Corridor onboarding',
-        checked: ['completed', 'no_need'].includes(corridorOnboarding.value.status),
-        statusLabel: getOnboardingStatusLabel('corridor', corridorOnboarding.value.status),
-        updatedAt: corridorOnboarding.value.lastUpdatedAt,
-        latestNote: getLatestOnboardingReviewerNote('corridor', corridorOnboarding.value)
-          || 'Compliance will continue the corridor handoff directly once FI submits the contact.',
-        ctaLabel: getKycTrackCtaLabel(corridorOnboarding.value.status),
-        panelKey: 'kyc-cdd' as KycWorkflowPanelKey,
-      },
-      {
-        label: 'WooshPay onboarding',
-        checked: ['completed', 'no_need'].includes(wooshpayOnboarding.value.status),
-        statusLabel: getOnboardingStatusLabel('wooshpay', wooshpayOnboarding.value.status),
-        updatedAt: wooshpayOnboarding.value.lastUpdatedAt,
-        latestNote: getLatestOnboardingReviewerNote('wooshpay', wooshpayOnboarding.value)
-          || 'Compliance will continue the onboarding directly with the corridor after the first package.',
-        ctaLabel: getKycTrackCtaLabel(wooshpayOnboarding.value.status),
-        panelKey: 'kyc-onboarding' as KycWorkflowPanelKey,
-      },
-    ],
+    state: kycOverview.value.displayStatus,
+    statusLabel: kycOverview.value.displayStatus,
+    history: kycHistory.value,
+    detailText: kycSummary.value,
+    themeKey: kycThemeKey.value,
   },
   {
-    key: 'nda' as WorkflowNodeKey,
+    key: 'nda',
     title: 'Non-Disclosure Agreement',
     state: props.globalProgress.nda,
-    history: props.submissionHistory?.nda,
+    statusLabel: normalizeNdaStatusLabel(props.globalProgress.nda),
+    history: ndaHistory.value,
   },
   {
-    key: 'msa' as WorkflowNodeKey,
+    key: 'msa',
     title: 'Master Services Agreement',
     state: props.globalProgress.contract,
-    history: props.submissionHistory?.msa,
+    statusLabel: normalizeMsaStatusLabel(props.globalProgress.contract),
+    history: msaHistory.value,
   },
   {
-    key: 'pricing' as WorkflowNodeKey,
+    key: 'pricing',
     title: 'Pricing Schedule',
     state: props.globalProgress.pricing,
+    statusLabel: normalizeWorkflowStatusLabel(props.globalProgress.pricing),
     history: props.pricingUpdatedAt ? { date: props.pricingUpdatedAt } : props.submissionHistory?.pricing,
     detailText: props.pricingSummary,
   },
   {
-    key: 'tech' as WorkflowNodeKey,
+    key: 'tech',
     title: 'Technical Integration',
     state: props.globalProgress.tech,
+    statusLabel: normalizeWorkflowStatusLabel(props.globalProgress.tech),
     history: props.submissionHistory?.tech,
   },
 ]);
 
-const handleNodeClick = (key: WorkflowNodeKey | KycWorkflowPanelKey) => {
+const handleNodeClick = (key: WorkflowNodeKey) => {
   emit('nodeClick', key);
 };
 
-const getStatusTheme = (state: string) => {
-  const s = (state || 'Not Started').toLowerCase();
-  if (s === 'completed' || s === 'approved' || s === 'signed') {
+const getKycStatusTheme = (status: OnboardingStatusKey) => {
+  if (status === 'completed') {
     return {
       bg: '#f0fdf4',
       border: '#bbf7d0',
       accent: '#16a34a',
       text: '#166534',
       chipBg: '#dcfce7',
-      label: 'Completed',
       status: 'success',
     };
   }
-  if (s.includes('review') || s.includes('process') || s.includes('ongoing') || s.includes('pending')) {
+  if (status === 'no_need') {
     return {
-      bg: '#eff6ff',
-      border: '#bfdbfe',
-      accent: '#2563eb',
-      text: '#1d4ed8',
-      chipBg: '#dbeafe',
-      label: 'In Progress',
+      bg: '#f8fafc',
+      border: '#d1d5db',
+      accent: '#6b7280',
+      text: '#4b5563',
+      chipBg: '#e5e7eb',
+      status: 'default',
+    };
+  }
+  if (status === 'self_preparation') {
+    return {
+      bg: '#fff7ed',
+      border: '#fdba74',
+      accent: '#c2410c',
+      text: '#c2410c',
+      chipBg: '#ffedd5',
       status: 'processing',
     };
   }
+  if (status === 'counterparty_reviewing') {
+    return {
+      bg: '#eff6ff',
+      border: '#93c5fd',
+      accent: '#2563eb',
+      text: '#1d4ed8',
+      chipBg: '#dbeafe',
+      status: 'processing',
+    };
+  }
+
+  return {
+    bg: '#f8fafc',
+    border: '#cbd5e1',
+    accent: '#64748b',
+    text: '#475569',
+    chipBg: '#e2e8f0',
+    status: 'default',
+  };
+};
+
+const resolveNodeStatusTheme = (key: WorkflowNodeKey, state: string) => {
+  if (key === 'nda') return getNdaStatusTheme(state);
+  if (key === 'msa') return getMsaStatusTheme(state);
+  return getWorkflowStatusTheme(state);
+};
+
+const getStatusTheme = (node: BoardNode) => {
+  if (node.key === 'kyc') {
+    return getKycStatusTheme(node.themeKey || 'not_started');
+  }
+
+  const theme = resolveNodeStatusTheme(node.key, node.statusLabel);
+  const normalizedState = node.statusLabel.toLowerCase();
+  if (normalizedState.includes('pending')) {
+    return {
+      bg: '#fff7ed',
+      border: '#fed7aa',
+      accent: theme.text,
+      text: theme.text,
+      chipBg: theme.bg,
+      status: 'processing',
+    };
+  }
+  if (normalizedState === 'completed' || normalizedState === 'approved' || normalizedState === 'signed') {
+    return {
+      bg: '#f0fdf4',
+      border: '#bbf7d0',
+      accent: theme.text,
+      text: theme.text,
+      chipBg: theme.bg,
+      status: 'success',
+    };
+  }
+  if (normalizedState.includes('review') || normalizedState.includes('process') || normalizedState.includes('ongoing')) {
+    return {
+      bg: '#eff6ff',
+      border: '#bfdbfe',
+      accent: theme.text,
+      text: theme.text,
+      chipBg: theme.bg,
+      status: 'processing',
+    };
+  }
+
   return {
     bg: '#ffffff',
     border: '#e2e8f0',
-    accent: '#94a3b8',
-    text: '#64748b',
-    chipBg: '#f1f5f9',
-    label: 'Not Started',
+    accent: theme.text,
+    text: theme.text,
+    chipBg: theme.bg,
     status: 'default',
   };
 };
@@ -187,89 +259,44 @@ const getStatusTheme = (state: string) => {
       <div
         v-for="node in nodes"
         :key="node.key"
-        class="flex flex-col p-5 rounded-2xl transition-all duration-300 border relative group overflow-hidden"
-        :class="'cursor-pointer hover:-translate-y-1'"
+        class="group relative flex cursor-pointer flex-col overflow-hidden rounded-2xl border p-5 transition-all duration-300 hover:-translate-y-1"
         :style="{
-          background: getStatusTheme(node.state).bg,
-          borderColor: getStatusTheme(node.state).border,
-          boxShadow: getStatusTheme(node.state).status === 'processing' ? '0 0 0 3px #2563eb14' : '0 1px 2px 0 rgba(15, 23, 42, 0.03)',
+          background: getStatusTheme(node).bg,
+          borderColor: getStatusTheme(node).border,
+          boxShadow: getStatusTheme(node).status === 'processing' ? '0 0 0 3px #2563eb14' : '0 1px 2px 0 rgba(15, 23, 42, 0.03)',
         }"
         @click="handleNodeClick(node.key)"
       >
         <div
-          class="absolute top-4 right-4 w-2.5 h-2.5 rounded-full z-10"
-          :style="{ background: getStatusTheme(node.state).accent }"
+          class="absolute top-4 right-4 z-10 h-2.5 w-2.5 rounded-full"
+          :style="{ background: getStatusTheme(node).accent }"
         ></div>
 
         <div class="mb-3 pr-6">
-          <span class="text-[14px] font-black text-slate-900 leading-tight block">{{ node.title }}</span>
+          <span class="block text-[14px] font-black leading-tight text-slate-900">{{ node.title }}</span>
         </div>
 
         <div class="mb-3">
-          <span class="text-[11px] font-bold px-2.5 py-1 rounded-lg uppercase tracking-wider" :style="{ background: getStatusTheme(node.state).chipBg, color: getStatusTheme(node.state).text }">
-            {{ getStatusTheme(node.state).label }}
+          <span
+            class="rounded-lg px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider"
+            :style="{ background: getStatusTheme(node).chipBg, color: getStatusTheme(node).text }"
+          >
+            {{ node.statusLabel }}
           </span>
         </div>
 
-        <div class="flex-1 mb-4">
-          <div v-if="node.key === 'kyc'" class="kyc-milestone-list">
-            <button
-              v-for="item in node.checklist"
-              :key="item.panelKey"
-              type="button"
-              class="kyc-milestone-item kyc-milestone-item--action"
-              :class="item.checked ? 'is-complete' : 'is-pending'"
-              @click.stop="handleNodeClick(item.panelKey)"
-            >
-              <span class="kyc-milestone-icon" aria-hidden="true">
-                <svg
-                  v-if="item.checked"
-                  class="kyc-milestone-check"
-                  width="10"
-                  height="8"
-                  viewBox="0 0 10 8"
-                  fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                >
-                  <path d="M1 4L3.5 6.5L9 1" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
-                </svg>
-              </span>
-              <span class="kyc-milestone-content">
-                <span class="kyc-milestone-label">{{ item.label }}</span>
-                <span class="kyc-milestone-meta">
-                  <span class="kyc-milestone-status">{{ item.statusLabel }}</span>
-                  <span v-if="item.updatedAt" class="kyc-milestone-time">{{ item.updatedAt }}</span>
-                </span>
-                <span class="kyc-milestone-note">{{ item.latestNote }}</span>
-              </span>
-              <span v-if="item.ctaLabel" class="kyc-milestone-cta">{{ item.ctaLabel }}</span>
-              <svg
-                class="kyc-milestone-arrow"
-                width="12"
-                height="12"
-                viewBox="0 0 12 12"
-                fill="none"
-                xmlns="http://www.w3.org/2000/svg"
-                aria-hidden="true"
-              >
-                <path d="M4.5 2.5L8 6L4.5 9.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-            </button>
-          </div>
-          <div v-else-if="node.key === 'pricing' && node.detailText" class="text-[13px] font-bold text-slate-700 leading-snug">
+        <div class="mb-4 flex-1">
+          <div v-if="node.detailText" class="text-[13px] font-bold leading-snug text-slate-700">
             {{ node.detailText }}
           </div>
-          <div v-else-if="node.state && node.state !== getStatusTheme(node.state).label" class="text-[13px] font-bold text-slate-700 leading-snug">
-            {{ node.state }}
-          </div>
-          <div v-if="node.history?.date" class="text-[11px] text-slate-400 mt-1.5 font-medium">Updated {{ node.history.date }}</div>
-          <div v-else class="text-[11px] text-slate-400 mt-1.5 font-medium italic">No update records</div>
+          <div v-if="node.history?.date" class="mt-1.5 text-[11px] font-medium text-slate-400">Updated {{ node.history.date }}</div>
+          <div v-else :class="node.key === 'kyc' ? 'mt-1.5 text-[11px] font-medium text-slate-400' : 'mt-1.5 text-[11px] font-medium italic text-slate-400'">No update records</div>
         </div>
 
-        <div class="flex items-center gap-2 mt-auto pt-4 border-t border-slate-200/50">
-          <div class="w-1.5 h-1.5 rounded-full" :style="{ background: getStatusTheme(node.state).accent }"></div>
+        <div class="mt-auto flex items-center gap-2 border-t border-slate-200/50 pt-4">
+          <div class="h-1.5 w-1.5 rounded-full" :style="{ background: getStatusTheme(node).accent }"></div>
           <span class="text-[12px] font-black text-sky-600 group-hover:underline">
-            {{ node.key === 'kyc' ? 'Manage KYC' : 'View details' }}
+            View details
           </span>
         </div>
       </div>
@@ -280,140 +307,5 @@ const getStatusTheme = (state: string) => {
 <style scoped>
 .clean-card {
   border-radius: 16px;
-}
-
-.kyc-milestone-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.kyc-milestone-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 24px;
-  width: 100%;
-}
-
-.kyc-milestone-item--action {
-  padding: 9px 10px;
-  border: 1px solid transparent;
-  border-radius: 14px;
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-  transition: transform 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
-}
-
-.kyc-milestone-item--action:hover {
-  transform: translateX(2px);
-  border-color: #dbeafe;
-  background: rgba(239, 246, 255, 0.72);
-}
-
-.kyc-milestone-icon {
-  width: 16px;
-  height: 16px;
-  border-radius: 999px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  border: 1.5px solid #cbd5e1;
-  background: #ffffff;
-}
-
-.kyc-milestone-check {
-  color: #ffffff;
-}
-
-.kyc-milestone-label {
-  font-size: 12px;
-  line-height: 1.45;
-  font-weight: 700;
-}
-
-.kyc-milestone-content {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.kyc-milestone-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.kyc-milestone-status {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 999px;
-  padding: 2px 8px;
-  background: rgba(255, 255, 255, 0.82);
-  color: #475569;
-  font-size: 10px;
-  font-weight: 800;
-}
-
-.kyc-milestone-time {
-  color: #94a3b8;
-  font-size: 10px;
-  font-weight: 700;
-}
-
-.kyc-milestone-note {
-  color: #64748b;
-  font-size: 11px;
-  line-height: 1.5;
-  font-weight: 600;
-}
-
-.kyc-milestone-cta {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 999px;
-  padding: 4px 10px;
-  background: #f5f3ff;
-  color: #7c3aed;
-  font-size: 10px;
-  font-weight: 900;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  flex-shrink: 0;
-}
-
-.kyc-milestone-arrow {
-  color: #94a3b8;
-  flex-shrink: 0;
-  transition: color 0.18s ease, transform 0.18s ease;
-}
-
-.kyc-milestone-item--action:hover .kyc-milestone-arrow {
-  color: #0284c7;
-  transform: translateX(1px);
-}
-
-.kyc-milestone-item.is-complete .kyc-milestone-icon {
-  border-color: #16a34a;
-  background: #16a34a;
-  box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.08);
-}
-
-.kyc-milestone-item.is-complete .kyc-milestone-label {
-  color: #1f2937;
-}
-
-.kyc-milestone-item.is-pending .kyc-milestone-icon {
-  border-color: #cbd5e1;
-  background: #f8fafc;
-}
-
-.kyc-milestone-item.is-pending .kyc-milestone-label {
-  color: #64748b;
 }
 </style>
