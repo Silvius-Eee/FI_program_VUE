@@ -28,6 +28,7 @@ import {
   PRICING_RULE_CARD_SYSTEM_CATALOG,
   PRICING_RULE_CARD_SYSTEM_IDS,
 } from '../constants/initialData';
+import { INPUT_LIMITS, showTextLimitWarning } from '../constants/inputLimits';
 
 const props = defineProps<{
   open: boolean;
@@ -35,6 +36,11 @@ const props = defineProps<{
   methodFormType?: 'card' | 'nonCard';
   hideHeader?: boolean;
   proposalMode?: string;
+  forceReadOnly?: boolean;
+  breadcrumbRootLabel?: string;
+  breadcrumbSectionLabel?: string;
+  breadcrumbProposalLabel?: string;
+  readOnlyDescription?: string;
 }>();
 
 const emit = defineEmits(['update:open', 'save']);
@@ -268,8 +274,17 @@ const usesFxMarkupFields = computed(() => isFxMarkupReference(formState.settleme
 const usesFxDetailField = computed(() => isFxDetailReference(formState.settlement?.fxCostReference));
 const isEditing = ref(true);
 const lastSavedSnapshot = ref<any>(null);
-const isReadOnly = computed(() => !props.hideHeader && !isEditing.value);
+const isForceReadOnly = computed(() => Boolean(props.forceReadOnly));
+const isReadOnly = computed(() => isForceReadOnly.value || (!props.hideHeader && !isEditing.value));
 const loadedMethodId = ref<string | null>(null);
+const breadcrumbRootLabel = computed(() => props.breadcrumbRootLabel || 'Corridor Detail');
+const breadcrumbSectionLabel = computed(() => props.breadcrumbSectionLabel || 'Pricing');
+const breadcrumbProposalLabel = computed(() => props.breadcrumbProposalLabel || 'Other Pricing Schedule');
+const headerDescription = computed(() => (
+  isForceReadOnly.value
+    ? (props.readOnlyDescription || 'View the payment method snapshot in read-only mode.')
+    : 'Edit one payment method at a time with grouped sections for pricing, capability, reserve, and settlement.'
+));
 
 const paymentMethodCatalog = ref([
   { id: 'card-visa', name: 'Card (Visa)', used: true },
@@ -374,6 +389,10 @@ const resetPricingCardEditor = () => {
 const handleAddCatalogMethod = () => {
   const name = normalizePaymentMethodName(newCatalogMethodName.value);
   if (!name) return;
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Payment Method', value: newCatalogMethodName.value, max: INPUT_LIMITS.name },
+  ])) return;
+
   if (paymentMethodCatalog.value.some(m => m.name.toLowerCase() === name.toLowerCase())) {
     return message.warning('This payment method already exists in catalog');
   }
@@ -395,6 +414,10 @@ const handleUpdateCatalogMethod = () => {
   const id = editingCatalogMethodId.value;
   const nextName = normalizePaymentMethodName(editingCatalogMethodName.value);
   if (!id || !nextName) return;
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Payment Method', value: editingCatalogMethodName.value, max: INPUT_LIMITS.name },
+  ])) return;
+
   const currentItem = paymentMethodCatalog.value.find((entry) => entry.id === id);
   if (!currentItem) return;
   if (paymentMethodCatalog.value.some((entry) => entry.id !== id && entry.name.toLowerCase() === nextName.toLowerCase())) {
@@ -422,6 +445,10 @@ const handleDeleteCatalogMethod = (id: string) => {
 const handleAddCatalogPaymentType = () => {
   const name = normalizeTextValue(newCatalogPaymentTypeName.value);
   if (!name) return;
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Payment Type', value: newCatalogPaymentTypeName.value, max: INPUT_LIMITS.name },
+  ])) return;
+
   if (paymentTypeCatalog.value.some((item) => item.name.toLowerCase() === name.toLowerCase())) {
     return message.warning('This payment type already exists in catalog');
   }
@@ -444,6 +471,10 @@ const handleUpdateCatalogPaymentType = () => {
   const id = editingCatalogPaymentTypeId.value;
   const nextName = normalizeTextValue(editingCatalogPaymentTypeName.value);
   if (!id || !nextName) return;
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Payment Type', value: editingCatalogPaymentTypeName.value, max: INPUT_LIMITS.name },
+  ])) return;
+
   const currentItem = paymentTypeCatalog.value.find((entry) => entry.id === id);
   if (!currentItem) return;
   if (paymentTypeCatalog.value.some((entry) => entry.id !== id && entry.name.toLowerCase() === nextName.toLowerCase())) {
@@ -521,6 +552,10 @@ const handleTogglePricingCardSelection = (cardId: string) => {
 const handleAddPricingCardCatalog = () => {
   const name = normalizeTextValue(newPricingCardName.value);
   if (!name) return;
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Card Name', value: newPricingCardName.value, max: INPUT_LIMITS.name },
+  ])) return;
+
   if (pricingRuleCardCatalog.value.some((item: any) => item.name.toLowerCase() === name.toLowerCase())) {
     return message.warning('This card already exists in catalog');
   }
@@ -542,6 +577,10 @@ const handleUpdatePricingCardCatalog = () => {
   const id = editingPricingCardId.value;
   const nextName = normalizeTextValue(editingPricingCardName.value);
   if (!id || !nextName) return;
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Card Name', value: editingPricingCardName.value, max: INPUT_LIMITS.name },
+  ])) return;
+
   const result = store.renameGlobalPricingRuleCard(id, nextName);
   if ((result as any)?.duplicate) {
     return message.warning('This card already exists in catalog');
@@ -784,7 +823,9 @@ watch(() => props.initialData, (newData) => {
     }
     syncCatalogsWithFormState();
     lastSavedSnapshot.value = cloneState(formState);
-    if (props.hideHeader || switchedRecord) {
+    if (isForceReadOnly.value) {
+      isEditing.value = false;
+    } else if (props.hideHeader || switchedRecord) {
       isEditing.value = true;
     }
   } else {
@@ -825,7 +866,7 @@ watch(() => props.initialData, (newData) => {
     syncCatalogsWithFormState();
     loadedMethodId.value = null;
     lastSavedSnapshot.value = cloneState(formState);
-    isEditing.value = true;
+    isEditing.value = !isForceReadOnly.value;
   }
 }, { immediate: true });
 
@@ -855,6 +896,7 @@ const handleCancel = () => {
 };
 
 const handleDiscardChanges = () => {
+  if (isForceReadOnly.value) return;
   if (props.hideHeader) {
     handleCancel();
     return;
@@ -870,10 +912,12 @@ const handleDiscardChanges = () => {
 };
 
 const handleEnterEditMode = () => {
+  if (isForceReadOnly.value) return;
   isEditing.value = true;
 };
 
 const handleSave = () => {
+  if (isForceReadOnly.value) return;
   formState.method = normalizePaymentMethodName(formState.method);
   if (!formState.method) return message.warning('Method name is required');
   formState.paymentType = inferPaymentType(formState.paymentType, formState.method, formState.methodForm);
@@ -883,6 +927,26 @@ const handleSave = () => {
   formState.cardPricingRules = normalizeCardPricingRules(formState.cardPricingRules);
   formState.selectedPricingCardIds = normalizeSelectedPricingCardIds(formState);
   syncCatalogsWithFormState();
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Payment Method', value: formState.method, max: INPUT_LIMITS.name },
+    { label: 'Settlement FX Cost Details', value: formState.settlement.fxCostDetails, max: INPUT_LIMITS.shortText },
+    { label: 'Reserve Notes', value: formState.reserve.notes, max: INPUT_LIMITS.note },
+    ...formState.pricingRows.map((row: any, index: number) => ({
+      label: `Pricing Rule ${index + 1} Tier Name`,
+      value: row.tierName,
+      max: INPUT_LIMITS.name,
+    })),
+    ...Object.values(formState.cardPricingRules || {}).flatMap((rows: any) => (
+      Array.isArray(rows)
+        ? rows.map((row: any, index: number) => ({
+          label: `Card Pricing Rule ${index + 1} Tier Name`,
+          value: row.tierName,
+          max: INPUT_LIMITS.name,
+        }))
+        : []
+    )),
+  ])) return;
+
   if (usesCardPricing.value) {
     ensureCardDefaults();
   }
@@ -906,6 +970,7 @@ defineExpose({
 });
 
 const handleDelete = () => {
+  if (isForceReadOnly.value) return;
   message.info('Delete functionality to be implemented');
 };
 
@@ -993,9 +1058,13 @@ onBeforeUnmount(() => {
     >
       <div class="mb-4">
         <a-breadcrumb separator="/">
-          <a-breadcrumb-item @click="emit('update:open', false)" class="cursor-pointer text-slate-400 hover:text-sky-600 transition-colors text-[13px] font-medium">Corridor Detail</a-breadcrumb-item>
-          <a-breadcrumb-item @click="emit('update:open', false)" class="cursor-pointer text-slate-400 hover:text-sky-600 transition-colors text-[13px] font-medium">Pricing</a-breadcrumb-item>
-          <a-breadcrumb-item class="text-slate-400 font-medium text-[13px]">Other Pricing Schedule</a-breadcrumb-item>
+          <a-breadcrumb-item @click="emit('update:open', false)" class="cursor-pointer text-slate-400 hover:text-sky-600 transition-colors text-[13px] font-medium">
+            {{ breadcrumbRootLabel }}
+          </a-breadcrumb-item>
+          <a-breadcrumb-item @click="emit('update:open', false)" class="cursor-pointer text-slate-400 hover:text-sky-600 transition-colors text-[13px] font-medium">
+            {{ breadcrumbSectionLabel }}
+          </a-breadcrumb-item>
+          <a-breadcrumb-item class="text-slate-400 font-medium text-[13px]">{{ breadcrumbProposalLabel }}</a-breadcrumb-item>
           <a-breadcrumb-item class="text-slate-900 font-bold text-[13px]">{{ formState.method }}</a-breadcrumb-item>
         </a-breadcrumb>
       </div>
@@ -1004,10 +1073,10 @@ onBeforeUnmount(() => {
         <div class="flex-1">
           <h2 class="text-[28px] font-black text-[#0f172a] m-0 leading-tight mb-2 tracking-tight">{{ formState.method || 'New Payment Method' }}</h2>
           <p class="text-slate-500 text-[14px] m-0 max-w-2xl font-medium leading-relaxed">
-            Edit one payment method at a time with grouped sections for pricing, capability, reserve, and settlement.
+            {{ headerDescription }}
           </p>
         </div>
-        <div class="flex items-center gap-3">
+        <div v-if="!isForceReadOnly" class="flex items-center gap-3">
           <template v-if="isEditing">
             <a-button @click="handleDiscardChanges" class="h-[40px] px-6 rounded-xl font-bold text-slate-400 bg-slate-50 border-none hover:bg-slate-100 transition-all">
               Discard
@@ -1030,14 +1099,18 @@ onBeforeUnmount(() => {
       layout="vertical"
       :model="formState"
       :disabled="isReadOnly"
-      :class="['payment-method-form', hideHeader ? 'space-y-3' : 'space-y-6']"
+      :class="[
+        'payment-method-form',
+        hideHeader ? 'space-y-3' : 'space-y-6',
+        isForceReadOnly ? 'payment-method-form--readonly-visual' : '',
+      ]"
     >
       <!-- Payment Method Overview Section -->
       <a-card class="section-card onboarding-card border-none shadow-sm" style="border-radius: 24px; background: #fff">
         <template #title>
           <div class="flex justify-between items-center w-full pr-4">
             <h3 class="text-[16px] font-black text-slate-900 m-0">Payment Method Overview</h3>
-            <div class="flex gap-2">
+            <div v-if="!isForceReadOnly" class="flex gap-2">
               <template v-if="hideHeader || isEditing">
                 <a-button size="small" @click="hideHeader ? handleCancel() : handleDiscardChanges()" class="rounded-lg font-bold text-slate-600 border-slate-200 px-4 h-[28px] text-[11px] bg-white">Discard</a-button>
                 <a-button type="primary" size="small" @click="handleSave" class="rounded-lg font-bold bg-[#0284c7] border-none px-4 h-[28px] text-[11px] shadow-sm">Save</a-button>
@@ -1134,6 +1207,7 @@ onBeforeUnmount(() => {
                         <a-input
                           v-if="editingCatalogPaymentTypeId"
                           v-model:value="editingCatalogPaymentTypeName"
+                          :maxlength="INPUT_LIMITS.name"
                           placeholder="Edit payment type"
                           class="catalog-picker-footer-input rounded-lg h-[38px] border-slate-200 text-[13px]"
                           @keydown.enter.prevent="handleUpdateCatalogPaymentType"
@@ -1141,6 +1215,7 @@ onBeforeUnmount(() => {
                         <a-input
                           v-else
                           v-model:value="newCatalogPaymentTypeName"
+                          :maxlength="INPUT_LIMITS.name"
                           placeholder="Add new payment type"
                           class="catalog-picker-footer-input rounded-lg h-[38px] border-slate-200 text-[13px]"
                           @keydown.enter.prevent="handleAddCatalogPaymentType"
@@ -1243,6 +1318,7 @@ onBeforeUnmount(() => {
                         <a-input
                           v-if="editingCatalogMethodId"
                           v-model:value="editingCatalogMethodName"
+                          :maxlength="INPUT_LIMITS.name"
                           placeholder="Edit payment method"
                           class="catalog-picker-footer-input rounded-lg h-[38px] border-slate-200 text-[13px]"
                           @keydown.enter.prevent="handleUpdateCatalogMethod"
@@ -1250,6 +1326,7 @@ onBeforeUnmount(() => {
                         <a-input
                           v-else
                           v-model:value="newCatalogMethodName"
+                          :maxlength="INPUT_LIMITS.name"
                           placeholder="Add new payment method"
                           class="catalog-picker-footer-input rounded-lg h-[38px] border-slate-200 text-[13px]"
                           @keydown.enter.prevent="handleAddCatalogMethod"
@@ -1295,7 +1372,7 @@ onBeforeUnmount(() => {
               <h3 class="text-[16px] font-black text-slate-900 m-0">Pricing Rules</h3>
               <p class="text-slate-400 text-[12px] font-medium m-0 mt-1">Summary: {{ pricingSummary }}</p>
             </div>
-            <div v-if="!hideHeader" class="flex gap-2">
+            <div v-if="!hideHeader && !isForceReadOnly" class="flex gap-2">
               <template v-if="isEditing">
                 <a-button size="small" @click="handleDiscardChanges" class="rounded-lg font-bold text-slate-600 border-slate-200 px-4 h-[28px] text-[11px] bg-white">Discard</a-button>
                 <a-button type="primary" size="small" @click="handleSave" class="rounded-lg font-bold bg-[#0284c7] border-none px-4 h-[28px] text-[11px] shadow-sm">Save</a-button>
@@ -1365,6 +1442,7 @@ onBeforeUnmount(() => {
                     <div class="pricing-card-panel-search">
                       <a-input
                         v-model:value="pricingCardSearch"
+                        :maxlength="INPUT_LIMITS.search"
                         allow-clear
                         placeholder="Select or add Cards"
                         class="rounded-xl h-[40px] border-slate-200"
@@ -1403,6 +1481,7 @@ onBeforeUnmount(() => {
                         <a-input
                           v-if="editingPricingCardId"
                           v-model:value="editingPricingCardName"
+                          :maxlength="INPUT_LIMITS.name"
                           placeholder="Rename Card"
                           class="catalog-picker-footer-input rounded-lg h-[38px] border-slate-200 text-[13px]"
                           @keydown.enter.prevent="handleUpdatePricingCardCatalog"
@@ -1410,6 +1489,7 @@ onBeforeUnmount(() => {
                         <a-input
                           v-else
                           v-model:value="newPricingCardName"
+                          :maxlength="INPUT_LIMITS.name"
                           placeholder="Add new Card"
                           class="catalog-picker-footer-input rounded-lg h-[38px] border-slate-200 text-[13px]"
                           @keydown.enter.prevent="handleAddPricingCardCatalog"
@@ -1467,7 +1547,7 @@ onBeforeUnmount(() => {
                     <h4 class="text-[15px] font-black text-slate-800 m-0">{{ item.name }}</h4>
                     <p class="text-slate-500 text-[12px] font-medium m-0 mt-0.5">{{ cardPricingEditorDescription }}</p>
                   </div>
-                  <a-button type="link" :disabled="isReadOnly" @click="addPricingRow(item.id)" class="flex items-center gap-1 font-bold text-sky-600 px-0">
+                  <a-button v-if="!isForceReadOnly" type="link" :disabled="isReadOnly" @click="addPricingRow(item.id)" class="flex items-center gap-1 font-bold text-sky-600 px-0">
                     <template #icon><plus-outlined /></template>Add Tiered Rule
                   </a-button>
                 </div>
@@ -1479,7 +1559,7 @@ onBeforeUnmount(() => {
                         {{ cardPricingEditorHint }}
                       </p>
                       <a-button
-                        v-if="getTierRuleActionLabel(row, Number(idx), item.id)"
+                        v-if="!isForceReadOnly && getTierRuleActionLabel(row, Number(idx), item.id)"
                         :disabled="isReadOnly"
                         @click="removePricingRow(item.id, Number(idx))"
                         class="h-[32px] rounded-xl border border-slate-200 bg-white px-4 text-[12px] font-bold"
@@ -1500,6 +1580,7 @@ onBeforeUnmount(() => {
                       </p>
                       <a-input
                         v-model:value="row.tierName"
+                        :maxlength="INPUT_LIMITS.name"
                         :disabled="isReadOnly"
                         placeholder="e.g. Domestic cards under 1,000 txns / month"
                         class="rounded-xl h-[42px] border-slate-200 bg-white"
@@ -1576,7 +1657,7 @@ onBeforeUnmount(() => {
                 <h4 class="text-[15px] font-black text-slate-800 m-0">Standard Pricing</h4>
                 <p class="text-slate-400 text-[12px] font-medium m-0 mt-0.5">Set the base rule first. Tiered rules only appear after you add them.</p>
               </div>
-              <a-button type="link" :disabled="isReadOnly" @click="addPricingRow('general')" class="flex items-center gap-1 font-bold text-sky-600 px-0">
+              <a-button v-if="!isForceReadOnly" type="link" :disabled="isReadOnly" @click="addPricingRow('general')" class="flex items-center gap-1 font-bold text-sky-600 px-0">
                 <template #icon><plus-outlined /></template>Add Tiered Rule
               </a-button>
             </div>
@@ -1587,7 +1668,7 @@ onBeforeUnmount(() => {
                   {{ cardPricingEditorHint }}
                 </p>
                 <a-button
-                  v-if="getTierRuleActionLabel(row, Number(idx), 'general')"
+                  v-if="!isForceReadOnly && getTierRuleActionLabel(row, Number(idx), 'general')"
                   :disabled="isReadOnly"
                   @click="removePricingRow('general', Number(idx))"
                   class="h-[32px] rounded-xl border border-slate-200 bg-white px-4 text-[12px] font-bold"
@@ -1608,6 +1689,7 @@ onBeforeUnmount(() => {
                 </p>
                 <a-input
                   v-model:value="row.tierName"
+                  :maxlength="INPUT_LIMITS.name"
                   :disabled="isReadOnly"
                   placeholder="e.g. Domestic cards under 1,000 txns / month"
                   class="rounded-xl h-[42px] border-slate-200 bg-white"
@@ -1698,7 +1780,7 @@ onBeforeUnmount(() => {
               <h3 class="text-[16px] font-black text-slate-900 m-0">Payment Capability</h3>
               <p class="text-slate-400 text-[12px] font-medium m-0 mt-1">Summary: {{ capabilitySummary }}</p>
             </div>
-            <div v-if="!hideHeader" class="flex gap-2">
+            <div v-if="!hideHeader && !isForceReadOnly" class="flex gap-2">
               <template v-if="isEditing">
                 <a-button size="small" @click="handleDiscardChanges" class="rounded-lg font-bold text-slate-600 border-slate-200 px-4 h-[28px] text-[11px] bg-white">Discard</a-button>
                 <a-button type="primary" size="small" @click="handleSave" class="rounded-lg font-bold bg-[#0284c7] border-none px-4 h-[28px] text-[11px] shadow-sm">Save</a-button>
@@ -1870,7 +1952,7 @@ onBeforeUnmount(() => {
                 <div v-if="formState.reserve.type === 'Case by Case'" class="mt-4">
                   <div class="flex flex-col gap-2">
                     <span class="text-[13px] font-bold text-slate-700 whitespace-nowrap h-6 flex items-center">Reserve Notes</span>
-                    <a-textarea v-model:value="formState.reserve.notes" :rows="3" placeholder="Enter specific reserve conditions..." class="rounded-xl border-slate-200" />
+                    <a-textarea v-model:value="formState.reserve.notes" :maxlength="INPUT_LIMITS.note" :rows="3" show-count placeholder="Enter specific reserve conditions..." class="rounded-xl border-slate-200" />
                   </div>
                 </div>
               </div>
@@ -1959,10 +2041,13 @@ onBeforeUnmount(() => {
                   </template>
                   <div v-else-if="usesFxDetailField" class="fx-cost-details-field flex flex-col gap-2">
                     <span class="text-[13px] font-bold text-slate-700 whitespace-nowrap h-6 flex items-center">FX Cost Details</span>
-                    <a-input
+                    <a-textarea
                       v-model:value="formState.settlement.fxCostDetails"
+                      :maxlength="INPUT_LIMITS.shortText"
+                      :auto-size="{ minRows: 3, maxRows: 6 }"
+                      show-count
                       placeholder="Explain FX reference details..."
-                      class="rounded-xl h-[44px] border-slate-200"
+                      class="rounded-xl border-slate-200"
                     />
                   </div>
                 </div>
@@ -1982,7 +2067,7 @@ onBeforeUnmount(() => {
                 <h3 class="text-[16px] font-black text-slate-900 m-0">Reserve</h3>
                 <p class="text-slate-400 text-[12px] font-medium m-0 mt-1">Summary: {{ reserveSummary }}</p>
               </div>
-              <div class="flex gap-2">
+              <div v-if="!isForceReadOnly" class="flex gap-2">
                 <template v-if="isEditing">
                   <a-button size="small" @click="handleDiscardChanges" class="rounded-lg font-bold text-slate-600 border-slate-200 px-4 h-[28px] text-[11px] bg-white">Discard</a-button>
                   <a-button type="primary" size="small" @click="handleSave" class="rounded-lg font-bold bg-[#0284c7] border-none px-4 h-[28px] text-[11px] shadow-sm">Save</a-button>
@@ -2048,7 +2133,7 @@ onBeforeUnmount(() => {
             <div v-if="formState.reserve.type === 'Case by Case'">
               <div class="flex flex-col gap-2">
                 <span class="text-[13px] font-bold text-slate-700">Reserve Notes</span>
-                <a-textarea v-model:value="formState.reserve.notes" :rows="3" placeholder="Enter specific reserve conditions..." class="rounded-xl border-slate-200" />
+                <a-textarea v-model:value="formState.reserve.notes" :maxlength="INPUT_LIMITS.note" :rows="3" show-count placeholder="Enter specific reserve conditions..." class="rounded-xl border-slate-200" />
               </div>
             </div>
           </div>
@@ -2062,7 +2147,7 @@ onBeforeUnmount(() => {
                 <h3 class="text-[16px] font-black text-slate-900 m-0">Settlement</h3>
                 <p class="text-slate-400 text-[12px] font-medium m-0 mt-1">Summary: {{ settlementSummary }}</p>
               </div>
-              <div class="flex gap-2">
+              <div v-if="!isForceReadOnly" class="flex gap-2">
                 <template v-if="isEditing">
                   <a-button size="small" @click="handleDiscardChanges" class="rounded-lg font-bold text-slate-600 border-slate-200 px-4 h-[28px] text-[11px] bg-white">Discard</a-button>
                   <a-button type="primary" size="small" @click="handleSave" class="rounded-lg font-bold bg-[#0284c7] border-none px-4 h-[28px] text-[11px] shadow-sm">Save</a-button>
@@ -2147,10 +2232,13 @@ onBeforeUnmount(() => {
               </template>
               <div v-else-if="usesFxDetailField" class="fx-cost-details-field flex flex-col gap-2">
                 <span class="text-[13px] font-bold text-slate-700">FX Cost Details</span>
-                <a-input
+                <a-textarea
                   v-model:value="formState.settlement.fxCostDetails"
+                  :maxlength="INPUT_LIMITS.shortText"
+                  :auto-size="{ minRows: 3, maxRows: 6 }"
+                  show-count
                   placeholder="Explain FX reference details..."
-                  class="rounded-xl h-[44px] border-slate-200"
+                  class="rounded-xl border-slate-200"
                 />
               </div>
             </div>
@@ -2562,6 +2650,37 @@ onBeforeUnmount(() => {
 .catalog-picker-trigger:disabled {
   opacity: 0.7;
   cursor: not-allowed;
+}
+
+.payment-method-form--readonly-visual :deep(.ant-input[disabled]),
+.payment-method-form--readonly-visual :deep(.ant-input-affix-wrapper-disabled),
+.payment-method-form--readonly-visual :deep(.ant-input-number-disabled),
+.payment-method-form--readonly-visual :deep(.ant-input-number-disabled .ant-input-number-input),
+.payment-method-form--readonly-visual :deep(.ant-select-disabled .ant-select-selector),
+.payment-method-form--readonly-visual :deep(.ant-picker-disabled),
+.payment-method-form--readonly-visual :deep(.ant-picker-input > input[disabled]),
+.payment-method-form--readonly-visual :deep(.ant-cascader-picker-disabled),
+.payment-method-form--readonly-visual :deep(.ant-cascader-picker-disabled .ant-input),
+.payment-method-form--readonly-visual :deep(textarea.ant-input[disabled]) {
+  color: #0f172a !important;
+  -webkit-text-fill-color: #0f172a !important;
+  background: #ffffff !important;
+  border-color: #d9e2ef !important;
+  opacity: 1 !important;
+  cursor: default !important;
+  box-shadow: none !important;
+}
+
+.payment-method-form--readonly-visual :deep(.ant-select-disabled .ant-select-arrow),
+.payment-method-form--readonly-visual :deep(.ant-picker-suffix),
+.payment-method-form--readonly-visual :deep(.ant-input-number-handler-wrap) {
+  color: #94a3b8 !important;
+}
+
+.payment-method-form--readonly-visual .catalog-picker-trigger:disabled,
+.payment-method-form--readonly-visual .capability-pill-btn:disabled {
+  opacity: 1;
+  cursor: default;
 }
 
 .catalog-picker-trigger.is-open {

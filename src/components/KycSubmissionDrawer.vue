@@ -4,6 +4,7 @@ import {
   CloseOutlined,
 } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
+import { INPUT_LIMITS, showTextLimitWarning } from '../constants/inputLimits';
 
 const props = defineProps<{
   open: boolean;
@@ -37,6 +38,11 @@ const handleSubmit = () => {
     message.warning('Please select at least one contracting entity.');
     return;
   }
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Document Link', value: formState.documentLink, max: INPUT_LIMITS.url },
+    { label: 'Additional Notes', value: formState.notes, max: INPUT_LIMITS.note },
+  ])) return;
+
   message.success('KYC Materials submitted successfully');
   emit('submit', { ...formState });
   emit('update:open', false);
@@ -114,6 +120,7 @@ const handleSubmit = () => {
               </template>
               <a-input 
                 v-model:value="formState.documentLink" 
+                :maxlength="INPUT_LIMITS.url"
                 placeholder="https://docs.google.com/d/..." 
                 class="h-[48px] rounded-xl border-slate-200 mt-2" 
               />
@@ -127,7 +134,9 @@ const handleSubmit = () => {
               </template>
               <a-textarea 
                 v-model:value="formState.notes" 
+                :maxlength="INPUT_LIMITS.note"
                 :rows="4" 
+                show-count
                 class="rounded-xl border-slate-200 mt-2" 
               />
             </a-form-item>

@@ -11,6 +11,7 @@ import {
   type OnboardingQueueTab,
   type OnboardingTrack,
 } from '../constants/onboarding';
+import { INPUT_LIMITS } from '../constants/inputLimits';
 
 const props = defineProps<{
   isStandalone?: boolean;
@@ -34,10 +35,19 @@ const activeTrack = computed<OnboardingTrack>({
   set: (value) => store.setKycQueueFilters({ track: value }),
 });
 
+const trackOptions: { label: string; value: OnboardingTrack }[] = [
+  { label: 'WooshPay onboarding', value: 'wooshpay' },
+  { label: 'Corridor onboarding', value: 'corridor' },
+];
+
+const setActiveTrack = (track: OnboardingTrack) => {
+  activeTrack.value = track;
+};
+
 const allRows = computed(() => buildOnboardingQueueRows(store.channelList, new Date()));
 
 const ownerOptions = computed(() => ([
-  { label: 'All FI owners', value: 'all' },
+  { label: 'All FIOPs', value: 'all' },
   ...[...new Set(
     allRows.value
       .filter((row) => row.track === activeTrack.value)
@@ -64,10 +74,15 @@ const statusCounts = computed(() => (
 
 const statusOptions = computed(() => (
   statusOrder.map((tab) => ({
-    label: `${getOnboardingQueueTabLabel(activeTrack.value, tab)} (${statusCounts.value[tab]})`,
+    label: getOnboardingQueueTabLabel(activeTrack.value, tab),
     value: tab,
+    count: statusCounts.value[tab],
   }))
 ));
+
+const setActiveStatus = (status: OnboardingQueueTab) => {
+  activeStatus.value = status;
+};
 
 const filteredRows = computed(() => {
   const keyword = filters.value.keyword.trim().toLowerCase();
@@ -88,38 +103,27 @@ const filteredRows = computed(() => {
     });
 });
 
-const columns = computed(() => {
-  if (activeStatus.value === 'reviewing') {
-    return [
-      { title: 'Corridor', key: 'corridorName' },
-      { title: 'Review track', key: 'track' },
-      { title: 'FI owner', key: 'fiOwner' },
-      { title: 'Submitted for review', key: 'latestSubmissionAt' },
-      { title: 'What FI shared', key: 'latestNote' },
-      { title: 'Action', key: 'action' },
-    ];
-  }
+const columns = [
+  { title: 'Corridor', key: 'corridorName' },
+  { title: 'Track', key: 'track' },
+  { title: 'FIOP', key: 'fiOwner' },
+  { title: 'Status', key: 'status' },
+  { title: 'Date', key: 'queueDate' },
+  { title: 'Note', key: 'queueNote' },
+  { title: 'Action', key: 'action' },
+];
 
-  if (activeStatus.value === 'preparation') {
-    return [
-      { title: 'Corridor', key: 'corridorName' },
-      { title: 'Update track', key: 'track' },
-      { title: 'FI owner', key: 'fiOwner' },
-      { title: 'Update requested on', key: 'needInputSince' },
-      { title: 'Reviewer note', key: 'requestNote' },
-      { title: 'Action', key: 'action' },
-    ];
-  }
+const getQueueDate = (row: OnboardingQueueRow) => {
+  if (row.queueTab === 'reviewing') return row.latestSubmissionAt;
+  if (row.queueTab === 'preparation') return row.needInputSince;
+  return row.decidedAt || row.updatedAt;
+};
 
-  return [
-    { title: 'Corridor', key: 'corridorName' },
-    { title: 'Track', key: 'track' },
-    { title: 'FI owner', key: 'fiOwner' },
-    { title: 'Decision', key: 'finalStatus' },
-    { title: 'Closed on', key: 'decidedAt' },
-    { title: 'Action', key: 'action' },
-  ];
-});
+const getQueueNote = (row: OnboardingQueueRow) => {
+  if (row.queueTab === 'reviewing') return row.latestNote;
+  if (row.queueTab === 'preparation') return row.requestNote;
+  return row.latestReviewerNote || row.latestNote;
+};
 
 const topTrackDescription = computed(() => (
   activeTrack.value === 'wooshpay'
@@ -194,28 +198,43 @@ onBeforeUnmount(() => {
         <div class="workspace-control-panel">
           <div class="workspace-filter-group">
             <div class="workspace-filter-label">Track</div>
-            <a-segmented
-              v-model:value="activeTrack"
-              class="workspace-segmented workspace-segmented--track"
-              :options="[
-                { label: 'WooshPay onboarding', value: 'wooshpay' },
-                { label: 'Corridor onboarding', value: 'corridor' },
-              ]"
-            />
+            <div class="track-tab-list" role="tablist" aria-label="Onboarding track">
+              <button
+                v-for="option in trackOptions"
+                :key="option.value"
+                type="button"
+                role="tab"
+                :aria-selected="activeTrack === option.value"
+                :class="['track-tab', { 'track-tab--active': activeTrack === option.value }]"
+                @click="setActiveTrack(option.value)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
           </div>
 
           <div class="workspace-filter-group">
             <div class="workspace-filter-label">Status</div>
-            <a-segmented
-              v-model:value="activeStatus"
-              class="workspace-segmented workspace-segmented--status"
-              :options="statusOptions"
-            />
+            <div class="status-queue-list" role="tablist" aria-label="KYC queue status">
+              <button
+                v-for="option in statusOptions"
+                :key="option.value"
+                type="button"
+                role="tab"
+                :aria-selected="activeStatus === option.value"
+                :class="['status-queue-card', { 'status-queue-card--active': activeStatus === option.value }]"
+                @click="setActiveStatus(option.value)"
+              >
+                <span class="status-queue-card__label">{{ option.label }}</span>
+                <span class="status-queue-card__count">{{ option.count }}</span>
+              </button>
+            </div>
           </div>
 
           <div class="workspace-inline-tools">
             <a-input
               :value="filters.keyword"
+              :maxlength="INPUT_LIMITS.search"
               allow-clear
               placeholder="Search corridor"
               class="toolbar-control toolbar-control--search"
@@ -237,7 +256,7 @@ onBeforeUnmount(() => {
           :data-source="filteredRows"
           :columns="columns"
           :pagination="{ pageSize: 8 }"
-          :scroll="{ x: 980, y: tableScrollY }"
+          :scroll="{ x: 1180, y: tableScrollY }"
           :custom-row="buildRowClick"
           row-key="id"
         >
@@ -265,15 +284,15 @@ onBeforeUnmount(() => {
               <a-tag class="owner-tag">{{ record.fiOwner }}</a-tag>
             </template>
 
-            <template v-else-if="['latestSubmissionAt', 'needInputSince', 'decidedAt'].includes(String(column.key))">
-              <span class="value-text">{{ record[column.key] || '-' }}</span>
+            <template v-else-if="column.key === 'queueDate'">
+              <span class="value-text">{{ getQueueDate(record) || '-' }}</span>
             </template>
 
-            <template v-else-if="column.key === 'latestNote' || column.key === 'requestNote'">
-              <div class="note-cell">{{ record[column.key] || 'No note yet' }}</div>
+            <template v-else-if="column.key === 'queueNote'">
+              <div class="note-cell">{{ getQueueNote(record) || 'No note yet' }}</div>
             </template>
 
-            <template v-else-if="column.key === 'finalStatus'">
+            <template v-else-if="column.key === 'status'">
               <a-tag
                 :style="{ backgroundColor: getOnboardingStatusTheme(record.status).bg, color: getOnboardingStatusTheme(record.status).text, border: 'none', borderRadius: '999px', fontWeight: 800, padding: '4px 12px' }"
               >
@@ -282,7 +301,7 @@ onBeforeUnmount(() => {
             </template>
 
             <template v-else-if="column.key === 'action'">
-              <a-button type="link" class="action-link" @click.stop="openTask(record)">Open</a-button>
+              <a-button type="link" class="action-link" @click.stop="openTask(record)">Details</a-button>
             </template>
           </template>
 
@@ -366,32 +385,135 @@ onBeforeUnmount(() => {
   text-transform: uppercase;
 }
 
-.workspace-segmented {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+.track-tab-list {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
   padding: 3px;
+  background: #f8fbff;
+  border-radius: 12px;
 }
 
-.workspace-segmented--track {
-  background: #eef2ff;
-  border-color: #c7d2fe;
-}
-
-.workspace-segmented :deep(.ant-segmented-item) {
-  min-height: 36px;
-  border-radius: 9px;
-}
-
-.workspace-segmented :deep(.ant-segmented-item-label) {
-  padding: 7px 11px;
+.track-tab {
+  position: relative;
+  min-height: 38px;
+  padding: 8px 14px 10px;
+  color: #64748b;
   font-size: 12px;
-  font-weight: 800;
-  line-height: 1.35;
-  white-space: normal;
+  font-weight: 900;
+  line-height: 1.3;
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+  transition:
+    background-color 0.16s ease,
+    color 0.16s ease;
 }
 
-.workspace-segmented :deep(.ant-segmented-item-selected) {
-  color: #0f172a !important;
+.track-tab::after {
+  content: '';
+  position: absolute;
+  right: 14px;
+  bottom: 5px;
+  left: 14px;
+  height: 2px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.track-tab:hover {
+  color: #2563eb;
+  background: #eef6ff;
+}
+
+.track-tab:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.track-tab--active {
+  color: #1d4ed8;
+  background: #eaf3ff;
+}
+
+.track-tab--active::after {
+  background: #2563eb;
+}
+
+.status-queue-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(142px, 1fr));
+  gap: 7px;
+}
+
+.status-queue-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 46px;
+  padding: 9px 10px 9px 14px;
+  overflow: hidden;
+  color: #475569;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    color 0.16s ease;
+}
+
+.status-queue-card:hover {
+  color: #1e3a8a;
+  background: #f0f7ff;
+  border-color: #bfdbfe;
+}
+
+.status-queue-card:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.status-queue-card--active {
+  color: #0f172a;
+  background: #edf6ff;
+  border-color: #bfdbfe;
+}
+
+.status-queue-card__label {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.3;
+}
+
+.status-queue-card__count {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 24px;
+  padding: 0 8px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  background: #e2e8f0;
+  border-radius: 999px;
+}
+
+.status-queue-card--active .status-queue-card__count {
+  color: #1d4ed8;
+  background: #dbeafe;
 }
 
 .workspace-inline-tools {

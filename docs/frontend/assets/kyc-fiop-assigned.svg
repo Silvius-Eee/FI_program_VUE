@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="960" viewBox="0 0 1600 960">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#0f172a" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+  <style>
+    .title { font: 800 28px 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; fill: #0f172a; }
+    .summary { font: 600 14px 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; fill: #475569; }
+    .note-title { font: 800 16px 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; fill: #0f172a; }
+    .note-body { font: 600 13px 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; fill: #475569; }
+    .badge-text { font: 800 16px 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; fill: white; dominant-baseline: middle; text-anchor: middle; }
+  </style>
+  <image href="kyc-fiop-assigned.png" x="0" y="0" width="1600" height="960"/>
+  <rect x="0" y="720" width="1600" height="240" fill="#f8fafc" fill-opacity="0.96"/>
+  <rect x="24" y="736" width="1552" height="208" rx="28" fill="white" fill-opacity="0.92" filter="url(#shadow)"/>
+  <text x="48" y="774" class="title">KYC / Assigned FIOP</text>
+  <text x="48" y="804" class="summary">Assigned FIOP/FIBD users can edit, submit, and supplement KYC for their corridors.</text>
+  
+  <rect x="129" y="72" width="1320" height="140" rx="14" fill="rgba(37,99,235,0.08)" stroke="#2563eb" stroke-width="4"/>
+  <circle cx="147" cy="90" r="16" fill="#2563eb"/>
+  <text x="147" y="91" class="badge-text">1</text>
+  <rect x="36" y="824" width="500" height="98" rx="18" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <circle cx="62" cy="850" r="14" fill="#2563eb"/>
+  <text x="62" y="851" class="badge-text" style="font-size:13px">1</text>
+  <text x="88" y="855" class="note-title">KYC remains corridor-scoped</text>
+  <text x="60" y="882" class="note-body">Corridor access is the prerequisite for opening KYC.</text>
+<text x="60" y="900" class="note-body">Return flow typically goes back to detail.</text>
+
+  <rect x="128" y="230" width="1320" height="80" rx="14" fill="rgba(37,99,235,0.08)" stroke="#2563eb" stroke-width="4"/>
+  <circle cx="146" cy="248" r="16" fill="#2563eb"/>
+  <text x="146" y="249" class="badge-text">2</text>
+  <rect x="554" y="824" width="500" height="98" rx="18" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <circle cx="580" cy="850" r="14" fill="#2563eb"/>
+  <text x="580" y="851" class="badge-text" style="font-size:13px">2</text>
+  <text x="606" y="855" class="note-title">Both onboarding tracks share the same guard</text>
+  <text x="578" y="882" class="note-body">Do not split FIOP and FIBD into different operator rights.</text>
+<text x="578" y="900" class="note-body">Only supervisor vs operator differs here.</text>
+
+  <rect x="128" y="327" width="673" height="592" rx="14" fill="rgba(37,99,235,0.08)" stroke="#2563eb" stroke-width="4"/>
+  <circle cx="146" cy="345" r="16" fill="#2563eb"/>
+  <text x="146" y="346" class="badge-text">3</text>
+  <rect x="1072" y="824" width="500" height="98" rx="18" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <circle cx="1098" cy="850" r="14" fill="#2563eb"/>
+  <text x="1098" y="851" class="badge-text" style="font-size:13px">3</text>
+  <text x="1124" y="855" class="note-title">The left form is editable for assigned operators</text>
+  <text x="1096" y="882" class="note-body">Assigned operators and supervisor can maintain the package.</text>
+<text x="1096" y="900" class="note-body">Bind both page entry and submit action to assignment.</text>
+</svg>

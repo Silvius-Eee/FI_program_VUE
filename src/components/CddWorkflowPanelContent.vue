@@ -1,18 +1,23 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue';
 import { message } from 'ant-design-vue';
+import { useAppStore } from '../stores/app';
 import {
   getChannelOnboardingWorkflow,
+  getOnboardingRevocableAction,
   getOnboardingStatusLabel,
   getOnboardingStatusTheme,
+  getOnboardingTimelineEvents,
   hasOnboardingSubmission,
 } from '../constants/onboarding';
+import { INPUT_LIMITS, showTextLimitWarning } from '../constants/inputLimits';
 
 const props = defineProps<{
   channel: any;
 }>();
 
-const emit = defineEmits(['submit', 'close']);
+const emit = defineEmits(['submit', 'close', 'revoke']);
+const store = useAppStore();
 
 const activeKey = ref('submission');
 
@@ -26,6 +31,12 @@ const formState = reactive({
 const workflow = computed(() => getChannelOnboardingWorkflow(props.channel, 'corridor'));
 const statusLabel = computed(() => getOnboardingStatusLabel('corridor', workflow.value.status));
 const statusTheme = computed(() => getOnboardingStatusTheme(workflow.value.status));
+const canOperateChannel = computed(() => store.canOperateFiWork(props.channel));
+const revocableAction = computed(() => (
+  canOperateChannel.value
+    ? getOnboardingRevocableAction('corridor', workflow.value, 'FIOP', store.currentUserName)
+    : null
+));
 
 const syncFormState = () => {
   const submission = workflow.value.submission;
@@ -42,23 +53,27 @@ const syncFormState = () => {
 watch(workflow, syncFormState, { immediate: true, deep: true });
 
 const historyEvents = computed(() => {
-  const events = workflow.value.statusHistory.map((entry) => ({
+  const events = getOnboardingTimelineEvents('corridor', workflow.value).map((entry) => ({
     id: entry.id,
-    type: 'status',
-    title: `Status updated to ${getOnboardingStatusLabel('corridor', entry.status)}`,
-    timestamp: entry.updatedAt,
-    actor: entry.updatedBy,
+    type: entry.eventType === 'submission' || entry.eventType === 'resubmission' ? 'submission' : 'status',
+    status: entry.displayStatus || entry.status,
+    timestamp: entry.time,
+    actor: entry.actorName,
     detail: entry.remark,
+    attachments: entry.attachments,
+    revoked: entry.lifecycle?.state === 'revoked',
   }));
 
-  if (hasOnboardingSubmission(workflow.value.submission)) {
+  if (!events.length && hasOnboardingSubmission(workflow.value.submission)) {
     events.push({
       id: 'submission',
       type: 'submission',
-      title: 'Package submitted to Compliance',
+      status: workflow.value.status,
       timestamp: workflow.value.submission.submittedAt,
       actor: workflow.value.submission.submittedBy,
       detail: workflow.value.submission.handoffNote || workflow.value.submission.notes,
+      attachments: workflow.value.submission.attachments,
+      revoked: false,
     });
   }
 
@@ -68,6 +83,13 @@ const historyEvents = computed(() => {
 });
 
 const handleSubmit = () => {
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Contact Name', value: formState.contactName, max: INPUT_LIMITS.contactName },
+    { label: 'Contact Method', value: formState.contactMethod, max: INPUT_LIMITS.contactMethod },
+    { label: 'Contact Detail', value: formState.contactValue, max: INPUT_LIMITS.contactValue },
+    { label: 'What Compliance should know', value: formState.handoffNote, max: INPUT_LIMITS.note },
+  ])) return;
+
   message.success('Corridor onboarding package submitted successfully');
   emit('submit', {
     contactName: formState.contactName,
@@ -114,15 +136,15 @@ const handleSubmit = () => {
           <div class="grid gap-4 md:grid-cols-2">
             <div>
               <div class="cdd-label-text">Contact Name</div>
-              <a-input v-model:value="formState.contactName" class="mt-2" placeholder="Primary corridor contact" />
+              <a-input v-model:value="formState.contactName" :maxlength="INPUT_LIMITS.contactName" class="mt-2" placeholder="Primary corridor contact" />
             </div>
             <div>
               <div class="cdd-label-text">Contact Method</div>
-              <a-input v-model:value="formState.contactMethod" class="mt-2" placeholder="Email, Slack, phone, or other direct channel" />
+              <a-input v-model:value="formState.contactMethod" :maxlength="INPUT_LIMITS.contactMethod" class="mt-2" placeholder="Email, Slack, phone, or other direct channel" />
             </div>
             <div class="md:col-span-2">
               <div class="cdd-label-text">Contact Detail</div>
-              <a-input v-model:value="formState.contactValue" class="mt-2" placeholder="Email address, handle, or phone number" />
+              <a-input v-model:value="formState.contactValue" :maxlength="INPUT_LIMITS.contactValue" class="mt-2" placeholder="Email address, handle, or phone number" />
             </div>
           </div>
         </div>
@@ -135,7 +157,9 @@ const handleSubmit = () => {
               </template>
               <a-textarea
                 v-model:value="formState.handoffNote"
+                :maxlength="INPUT_LIMITS.note"
                 :rows="5"
+                show-count
                 placeholder="Explain what changed, what matters, or what Compliance should pay attention to on this track."
                 class="cdd-textarea mt-2"
               />
@@ -150,10 +174,27 @@ const handleSubmit = () => {
             <a-timeline-item
               v-for="event in historyEvents"
               :key="event.id"
-              :color="event.type === 'submission' ? 'blue' : 'green'"
+              :color="event.revoked ? 'orange' : event.type === 'submission' ? 'blue' : 'green'"
             >
               <div class="flex flex-col gap-2">
-                <div class="text-[15px] font-black text-slate-800">{{ event.title }}</div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <span
+                    class="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-black"
+                    :style="{
+                      backgroundColor: getOnboardingStatusTheme(event.status).bg,
+                      color: getOnboardingStatusTheme(event.status).text,
+                      borderColor: getOnboardingStatusTheme(event.status).border,
+                    }"
+                  >
+                    {{ getOnboardingStatusLabel('corridor', event.status) }}
+                  </span>
+                  <span
+                    v-if="event.revoked"
+                    class="inline-flex items-center rounded-full border border-orange-200 bg-orange-100 px-2.5 py-0.5 text-[10px] font-black uppercase tracking-[0.12em] text-orange-700"
+                  >
+                    Revoked
+                  </span>
+                </div>
                 <div class="rounded-2xl border border-slate-100 bg-slate-50/50 p-5">
                   <div class="space-y-2 text-[13px] font-medium text-slate-600">
                     <div class="flex items-center gap-2">
@@ -168,7 +209,30 @@ const handleSubmit = () => {
                       <span class="shrink-0 text-slate-400">Notes:</span>
                       <span class="italic text-slate-900">"{{ event.detail }}"</span>
                     </div>
+                    <div v-if="event.attachments.length" class="flex items-start gap-2">
+                      <span class="shrink-0 text-slate-400">Attachments:</span>
+                      <span class="flex min-w-0 flex-wrap gap-2">
+                        <span
+                          v-for="attachment in event.attachments"
+                          :key="attachment.uid"
+                          class="inline-flex max-w-full items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-semibold text-slate-600"
+                        >
+                          <span class="truncate">{{ attachment.name }}</span>
+                        </span>
+                      </span>
+                    </div>
                   </div>
+                </div>
+                <div
+                  v-if="revocableAction && revocableAction.eventId === event.id"
+                  class="flex justify-end"
+                >
+                  <a-button
+                    class="h-[36px] rounded-xl border-orange-200 bg-orange-50 px-4 font-bold text-orange-700"
+                    @click="emit('revoke')"
+                  >
+                    {{ revocableAction.label }}
+                  </a-button>
                 </div>
               </div>
             </a-timeline-item>

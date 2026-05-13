@@ -4,6 +4,8 @@ import { useAppStore } from '../stores/app';
 import {
   INITIAL_CORRIDOR_VIEWS, 
   INITIAL_MATRIX_VIEWS,
+  buildLaunchApprovalQueueRows,
+  buildPricingApprovalQueueRows,
   cloneDashboardFieldSchema,
   cloneSavedDashboardView,
   type DashboardFieldDefinition,
@@ -25,6 +27,7 @@ import {
   normalizeNdaStatusLabel,
   normalizeWorkflowStatusLabel,
 } from '../utils/workflowStatus';
+import { INPUT_LIMITS, showTextLimitWarning } from '../constants/inputLimits';
 import {
   AppstoreOutlined,
   CloseOutlined,
@@ -39,8 +42,10 @@ import {
   QuestionCircleOutlined,
   MoreOutlined,
   SettingOutlined,
+  SafetyCertificateOutlined,
   TableOutlined,
-  LeftOutlined
+  LeftOutlined,
+  RocketOutlined
 } from '@ant-design/icons-vue';
 import { message, Modal } from 'ant-design-vue';
 import dayjs from 'dayjs';
@@ -57,6 +62,16 @@ const resolveLegalStatusTheme = (fieldKey: string, value: unknown) => {
   return getWorkflowStatusTheme(value);
 };
 
+const onboardingStatusFieldKeySet = new Set(['wooshpayOnboardingStatus', 'corridorOnboardingStatus']);
+const workflowStatusFieldKeySet = new Set([
+  ...onboardingStatusFieldKeySet,
+  'ndaStatus',
+  'contractStatus',
+  'pricingProposalStatus',
+  'techStatus',
+]);
+const isOnboardingStatusField = (fieldKey: string) => onboardingStatusFieldKeySet.has(fieldKey);
+
 const dashboardFilterOperatorValues = ['equals', 'notEquals', 'contains', 'notContains', 'isEmpty', 'isNotEmpty'] as const;
 type DashboardFilterOperator = typeof dashboardFilterOperatorValues[number];
 
@@ -64,11 +79,13 @@ const dashboardFilterFieldKeys = [
   'supportedProducts',
   'cooperationMode',
   'fiopOwner',
+  'fibdOwner',
   'status',
   'merchantGeo',
   'settlementCurrency',
   'paymentMethod',
-  'complianceStatus',
+  'wooshpayOnboardingStatus',
+  'corridorOnboardingStatus',
   'ndaStatus',
   'contractStatus',
   'pricingProposalStatus',
@@ -118,6 +135,29 @@ const buildUniqueOptions = (values: Array<string | null | undefined>) => (
   [...new Set(values.map((value) => String(value ?? '').trim()).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b))
     .map((value) => ({ label: value, value }))
+);
+const buildAssignmentDisplayNames = (primaryOwner: unknown, collaborators: unknown) => {
+  const collaboratorNames = Array.isArray(collaborators)
+    ? collaborators
+    : [collaborators];
+
+  const dedupedNames = [...new Set(
+    [primaryOwner, ...collaboratorNames]
+      .map((value) => String(value ?? '').trim())
+      .filter(Boolean),
+  )];
+
+  return dedupedNames.length ? dedupedNames : ['Unassigned'];
+};
+const getAssignmentDisplayNames = (item: any, role: 'fiop' | 'fibd') => (
+  role === 'fiop'
+    ? buildAssignmentDisplayNames(item?.fiopOwner, item?.fiopCollaboratorNames)
+    : buildAssignmentDisplayNames(item?.fibdOwner, item?.fibdCollaboratorNames)
+);
+const assignmentColumnFieldKeys = ['fiopOwner', 'fibdOwner'] as const;
+const assignmentColumnFieldKeySet = new Set<string>(assignmentColumnFieldKeys);
+const isAssignmentColumnField = (fieldOrKey: DashboardFieldDefinition | string) => (
+  assignmentColumnFieldKeySet.has(typeof fieldOrKey === 'string' ? fieldOrKey : fieldOrKey.key)
 );
 const dedupeFilterOptions = (options: DashboardFilterOption[] = []) => {
   const optionMap = new Map<string, DashboardFilterOption>();
@@ -183,6 +223,9 @@ const groupCreationState = reactive({
 const exportModalOpen = ref(false);
 const exportScope = ref('page');
 const selectedRowKeys = ref<any[]>([]);
+const contactModalOpen = ref(false);
+const contactEmail = 'fi-support@example.com';
+const contactMailtoLink = computed(() => `mailto:${contactEmail}?subject=${encodeURIComponent('FI System Support Request')}`);
 
 const pagination = reactive({
   current: 1,
@@ -193,6 +236,103 @@ const pagination = reactive({
 });
 
 const filterConditions = ref<DashboardFilterCondition[]>([]);
+const visibleCorridors = computed(() => store.visibleChannels);
+const isFiSupervisor = computed(() => store.currentUserRole === 'FI_SUPERVISOR');
+const isSupervisorCorridorAssignmentMode = computed(() => (
+  isFiSupervisor.value && viewMode.value === 'corridor'
+));
+const pendingPricingApprovalCount = computed(() => (
+  buildPricingApprovalQueueRows(store.channelList).filter((row) => row.queueTab === 'pending').length
+));
+const pendingLaunchApprovalCount = computed(() => (
+  buildLaunchApprovalQueueRows(store.channelList).filter((row) => row.queueTab === 'pending').length
+));
+const canCreateChannel = computed(() => store.canCreateChannel());
+const canManageAssignments = computed(() => store.canManageAssignments());
+type AssignmentLauncherRole = 'fiop' | 'fibd';
+const assignmentRoleLabelMap: Record<AssignmentLauncherRole, string> = {
+  fiop: 'FIOP',
+  fibd: 'FIBD',
+};
+const assignmentDrawerOpen = ref(false);
+const assignmentLauncherRole = ref<AssignmentLauncherRole>('fiop');
+const currentFiopFilterUserIds = ref<string[]>([]);
+const currentFibdFilterUserIds = ref<string[]>([]);
+const assignmentTargetChannelIds = ref<string[]>([]);
+const assignmentFormState = reactive({
+  primaryFiopUserId: undefined as string | undefined,
+  fiopCollaboratorUserIds: [] as string[],
+  primaryFibdUserId: undefined as string | undefined,
+  fibdCollaboratorUserIds: [] as string[],
+});
+const getAssignmentTargetValue = (channel: any) => (
+  String(channel?.channelId || channel?.id || '').trim()
+);
+const getUserNameById = (userId?: string | null) => (
+  store.users.find((user) => user.id === userId)?.name || String(userId || '').trim()
+);
+const buildCurrentAssignmentFilterOptions = (role: AssignmentLauncherRole) => {
+  const userIds = [...new Set(
+    visibleCorridors.value
+      .map((channel) => (
+        role === 'fiop'
+          ? channel.assignment?.primaryFiopUserId
+          : channel.assignment?.primaryFibdUserId
+      ))
+      .map((value) => String(value || '').trim())
+      .filter(Boolean),
+  )];
+
+  return userIds
+    .map((userId) => ({
+      value: userId,
+      label: getUserNameById(userId),
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+};
+const currentFiopFilterOptions = computed(() => buildCurrentAssignmentFilterOptions('fiop'));
+const currentFibdFilterOptions = computed(() => buildCurrentAssignmentFilterOptions('fibd'));
+const assignmentFilteredCorridors = computed(() => (
+  visibleCorridors.value.filter((channel) => {
+    const primaryFiopUserId = String(channel.assignment?.primaryFiopUserId || '').trim();
+    const primaryFibdUserId = String(channel.assignment?.primaryFibdUserId || '').trim();
+    if (assignmentLauncherRole.value === 'fiop') {
+      return !currentFiopFilterUserIds.value.length || currentFiopFilterUserIds.value.includes(primaryFiopUserId);
+    }
+    return !currentFibdFilterUserIds.value.length || currentFibdFilterUserIds.value.includes(primaryFibdUserId);
+  })
+));
+const assignmentTargetChannels = computed(() => (
+  assignmentTargetChannelIds.value
+    .map((targetId) => store.channelList.find((item) => (
+      getAssignmentTargetValue(item) === targetId
+      || String(item?.id || '').trim() === targetId
+      || String(item?.channelId || '').trim() === targetId
+    )) || null)
+    .filter(Boolean)
+));
+const assignmentTargetChannel = computed(() => (
+  assignmentTargetChannels.value.length === 1 ? assignmentTargetChannels.value[0] : null
+));
+const assignmentDrawerTitle = computed(() => `Assign ${assignmentRoleLabelMap[assignmentLauncherRole.value]}`);
+const assignmentTargetChannelOptions = computed(() => (
+  [...assignmentFilteredCorridors.value]
+    .sort((a, b) => String(a.channelName || '').localeCompare(String(b.channelName || '')))
+    .map((channel) => ({
+      label: `${channel.channelName} (${channel.channelId})`,
+      value: getAssignmentTargetValue(channel),
+    }))
+));
+const fiopUserOptions = computed(() => (
+  store.users
+    .filter((user) => user.active && user.role === 'FIOP')
+    .map((user) => ({ label: user.name, value: user.id }))
+));
+const fibdUserOptions = computed(() => (
+  store.users
+    .filter((user) => user.active && user.role === 'FIBD')
+    .map((user) => ({ label: user.name, value: user.id }))
+));
 
 const merchantGeoOptions = [
   {
@@ -301,12 +441,14 @@ const cooperationModeFilterOptions = buildUniqueOptions(['Referral', 'PayFac', '
 const corridorBaseColumnDefs = [
   { key: 'channelName', fixed: 'left', width: 220, sorter: (a: any, b: any) => a.channelName.localeCompare(b.channelName) },
   { key: 'status', width: 120 },
-  { key: 'complianceStatus', width: 170 },
+  { key: 'wooshpayOnboardingStatus', width: 190, sorter: (a: any, b: any) => String(a.wooshpayOnboardingStatus || '').localeCompare(String(b.wooshpayOnboardingStatus || '')) },
+  { key: 'corridorOnboardingStatus', width: 190, sorter: (a: any, b: any) => String(a.corridorOnboardingStatus || '').localeCompare(String(b.corridorOnboardingStatus || '')) },
   { key: 'ndaStatus', width: 120 },
   { key: 'contractStatus', width: 120 },
   { key: 'pricingProposalStatus', width: 120 },
   { key: 'techStatus', width: 120 },
-  { key: 'fiopOwner', width: 120 },
+  { key: 'fiopOwner', width: 200 },
+  { key: 'fibdOwner', width: 200 },
   { key: 'fiopTrackingLatest', width: 320, sorter: (a: any, b: any) => dayjs(a.fiopTrackingLatestTime || 0).unix() - dayjs(b.fiopTrackingLatestTime || 0).unix() },
   { key: 'cooperationModel', width: 180 },
   { key: 'merchantGeo', width: 200 },
@@ -327,12 +469,14 @@ const fieldFilterKeyMap: Partial<Record<string, DashboardFilterFieldKey[]>> = {
   supportedProducts: ['supportedProducts'],
   cooperationModel: ['cooperationMode'],
   fiopOwner: ['fiopOwner'],
+  fibdOwner: ['fibdOwner'],
   status: ['status'],
   merchantGeo: ['merchantGeo'],
   settlementCurrency: ['settlementCurrency'],
   paymentMethodName: ['paymentMethod'],
   paymentMethods: ['paymentMethod'],
-  complianceStatus: ['complianceStatus'],
+  wooshpayOnboardingStatus: ['wooshpayOnboardingStatus'],
+  corridorOnboardingStatus: ['corridorOnboardingStatus'],
   ndaStatus: ['ndaStatus'],
   contractStatus: ['contractStatus'],
   pricingProposalStatus: ['pricingProposalStatus'],
@@ -508,7 +652,7 @@ const dashboardFilterFieldConfigs = computed<DashboardFilterFieldConfig[]>(() =>
   },
   {
     key: 'cooperationMode',
-    label: getFilterFieldLabel('cooperationMode', 'Cooperation Mode'),
+    label: getFilterFieldLabel('cooperationMode', 'Cooperation Model'),
     controlType: 'select',
     options: cooperationModeFilterOptions,
     valuePlaceholder: 'Select mode',
@@ -517,25 +661,34 @@ const dashboardFilterFieldConfigs = computed<DashboardFilterFieldConfig[]>(() =>
   },
   {
     key: 'fiopOwner',
-    label: getFilterFieldLabel('fiopOwner', 'FI Owner'),
+    label: getFilterFieldLabel('fiopOwner', 'FIOP'),
     controlType: 'select',
-    options: buildUniqueOptions(store.channelList.map((item) => item.fiopOwner)),
+    options: buildUniqueOptions(visibleCorridors.value.flatMap((item) => getAssignmentDisplayNames(item, 'fiop'))),
     valuePlaceholder: 'Select owner',
-    getValue: (item) => item.fiopOwner ? [String(item.fiopOwner)] : [],
+    getValue: (item) => getAssignmentDisplayNames(item, 'fiop'),
+    isEmpty: defaultFilterIsEmpty,
+  },
+  {
+    key: 'fibdOwner',
+    label: getFilterFieldLabel('fibdOwner', 'FIBD'),
+    controlType: 'select',
+    options: buildUniqueOptions(visibleCorridors.value.flatMap((item) => getAssignmentDisplayNames(item, 'fibd'))),
+    valuePlaceholder: 'Select owner',
+    getValue: (item) => getAssignmentDisplayNames(item, 'fibd'),
     isEmpty: defaultFilterIsEmpty,
   },
   {
     key: 'status',
     label: getFilterFieldLabel('status', 'Status'),
     controlType: 'select',
-    options: buildUniqueOptions(store.channelList.map((item) => item.status || '').filter(Boolean)),
+    options: buildUniqueOptions(visibleCorridors.value.map((item) => item.status || '').filter(Boolean)),
     valuePlaceholder: 'Select status',
     getValue: (item) => item.status ? [String(item.status)] : [],
     isEmpty: defaultFilterIsEmpty,
   },
   {
     key: 'merchantGeo',
-    label: getFilterFieldLabel('merchantGeo', 'Merchant Geo Allowed'),
+    label: getFilterFieldLabel('merchantGeo', 'Supported Merchant Jurisdictions'),
     controlType: 'select',
     options: merchantGeoFilterOptions,
     valuePlaceholder: 'Select region',
@@ -563,7 +716,7 @@ const dashboardFilterFieldConfigs = computed<DashboardFilterFieldConfig[]>(() =>
     label: getFilterFieldLabel('paymentMethod', 'Payment Methods'),
     controlType: 'select',
     options: buildUniqueOptions(
-      store.channelList.flatMap((item) => (
+      visibleCorridors.value.flatMap((item) => (
         Array.isArray(item.paymentMethods)
           ? item.paymentMethods.map((method: string) => normalizePaymentMethodLabel(String(method)))
           : []
@@ -578,19 +731,28 @@ const dashboardFilterFieldConfigs = computed<DashboardFilterFieldConfig[]>(() =>
     isEmpty: defaultFilterIsEmpty,
   },
   {
-    key: 'complianceStatus',
-    label: getFilterFieldLabel('complianceStatus', 'Compliance'),
+    key: 'wooshpayOnboardingStatus',
+    label: getFilterFieldLabel('wooshpayOnboardingStatus', 'WooshPay onboarding'),
     controlType: 'select',
-    options: buildUniqueOptions(store.channelList.map((item) => item.complianceStatus)),
+    options: buildUniqueOptions(visibleCorridors.value.map((item) => item.wooshpayOnboardingStatus)),
     valuePlaceholder: 'Select status',
-    getValue: (item) => item.complianceStatus ? [String(item.complianceStatus)] : [],
+    getValue: (item) => item.wooshpayOnboardingStatus ? [String(item.wooshpayOnboardingStatus)] : [],
+    isEmpty: defaultFilterIsEmpty,
+  },
+  {
+    key: 'corridorOnboardingStatus',
+    label: getFilterFieldLabel('corridorOnboardingStatus', 'Corridor onboarding'),
+    controlType: 'select',
+    options: buildUniqueOptions(visibleCorridors.value.map((item) => item.corridorOnboardingStatus)),
+    valuePlaceholder: 'Select status',
+    getValue: (item) => item.corridorOnboardingStatus ? [String(item.corridorOnboardingStatus)] : [],
     isEmpty: defaultFilterIsEmpty,
   },
   {
     key: 'ndaStatus',
     label: getFilterFieldLabel('ndaStatus', 'NDA Status'),
     controlType: 'select',
-    options: buildUniqueOptions(store.channelList.map((item) => item.ndaStatus)),
+    options: buildUniqueOptions(visibleCorridors.value.map((item) => item.ndaStatus)),
     valuePlaceholder: 'Select status',
     getValue: (item) => item.ndaStatus ? [String(item.ndaStatus)] : [],
     isEmpty: defaultFilterIsEmpty,
@@ -599,7 +761,7 @@ const dashboardFilterFieldConfigs = computed<DashboardFilterFieldConfig[]>(() =>
     key: 'contractStatus',
     label: getFilterFieldLabel('contractStatus', 'Contract Status'),
     controlType: 'select',
-    options: buildUniqueOptions(store.channelList.map((item) => item.contractStatus)),
+    options: buildUniqueOptions(visibleCorridors.value.map((item) => item.contractStatus)),
     valuePlaceholder: 'Select status',
     getValue: (item) => item.contractStatus ? [String(item.contractStatus)] : [],
     isEmpty: defaultFilterIsEmpty,
@@ -608,7 +770,7 @@ const dashboardFilterFieldConfigs = computed<DashboardFilterFieldConfig[]>(() =>
     key: 'pricingProposalStatus',
     label: getFilterFieldLabel('pricingProposalStatus', 'Pricing Proposal'),
     controlType: 'select',
-    options: buildUniqueOptions(store.channelList.map((item) => item.pricingProposalStatus)),
+    options: buildUniqueOptions(visibleCorridors.value.map((item) => item.pricingProposalStatus)),
     valuePlaceholder: 'Select status',
     getValue: (item) => item.pricingProposalStatus ? [String(item.pricingProposalStatus)] : [],
     isEmpty: defaultFilterIsEmpty,
@@ -617,7 +779,7 @@ const dashboardFilterFieldConfigs = computed<DashboardFilterFieldConfig[]>(() =>
     key: 'techStatus',
     label: getFilterFieldLabel('techStatus', 'Tech Integration'),
     controlType: 'select',
-    options: buildUniqueOptions(store.channelList.map((item) => item.techStatus)),
+    options: buildUniqueOptions(visibleCorridors.value.map((item) => item.techStatus)),
     valuePlaceholder: 'Select status',
     getValue: (item) => item.techStatus ? [String(item.techStatus)] : [],
     isEmpty: defaultFilterIsEmpty,
@@ -770,7 +932,7 @@ const doesConditionMatchRecord = (item: any, condition: DashboardFilterCondition
 };
 
 const filteredCorridors = computed(() => {
-  return store.channelList.filter((item) => (
+  return visibleCorridors.value.filter((item) => (
     activeFilterConditions.value.every((condition) => doesConditionMatchRecord(item, condition))
   ));
 });
@@ -822,18 +984,171 @@ watch(
 );
 
 // --- 娴溿倓绨伴弬瑙勭《 ---
+watch(
+  () => assignmentTargetChannelOptions.value.map((option) => String(option.value)).join('|'),
+  () => {
+    const availableTargetIds = new Set(assignmentTargetChannelOptions.value.map((option) => String(option.value)));
+    const nextTargetIds = assignmentTargetChannelIds.value.filter((targetId) => availableTargetIds.has(targetId));
+    if (nextTargetIds.length === assignmentTargetChannelIds.value.length) return;
+    setAssignmentTargetChannelIds(nextTargetIds);
+  },
+);
+
 const handleAddNew = () => {
+  if (!canCreateChannel.value) return;
   store.setSelectedChannel(null);
   store.setView('form');
 };
 
 const handleViewDetails = (record: any) => {
   const targetId = record.channelId || record.id;
-  const channel = store.channelList.find(c => c.id === targetId || c.channelId === targetId);
+  const channel = store.visibleChannels.find(c => c.id === targetId || c.channelId === targetId);
   if (channel) {
     store.setSelectedChannel(channel);
     store.setView('detail');
   }
+};
+
+const resetAssignmentFormState = () => {
+  assignmentFormState.primaryFiopUserId = undefined;
+  assignmentFormState.fiopCollaboratorUserIds = [];
+  assignmentFormState.primaryFibdUserId = undefined;
+  assignmentFormState.fibdCollaboratorUserIds = [];
+};
+const resetAssignmentDrawerFilters = () => {
+  currentFiopFilterUserIds.value = [];
+  currentFibdFilterUserIds.value = [];
+};
+const resolveChannelById = (channelId?: string) => {
+  const targetId = String(channelId || '').trim();
+  if (!targetId) return null;
+  return store.channelList.find((item) => (
+    getAssignmentTargetValue(item) === targetId
+    || String(item?.id || '').trim() === targetId
+    || String(item?.channelId || '').trim() === targetId
+  )) || null;
+};
+const normalizeAssignmentTargetIds = (value: unknown) => (
+  [...new Set(
+    (Array.isArray(value) ? value : [value])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean),
+  )]
+);
+const syncAssignmentFormForTargetIds = (targetIds: string[]) => {
+  if (targetIds.length === 1) {
+    syncAssignmentFormState(resolveChannelById(targetIds[0]));
+    return;
+  }
+  resetAssignmentFormState();
+};
+const setAssignmentTargetChannelIds = (value: unknown) => {
+  const nextTargetIds = normalizeAssignmentTargetIds(value);
+  assignmentTargetChannelIds.value = nextTargetIds;
+  syncAssignmentFormForTargetIds(nextTargetIds);
+};
+const syncAssignmentFormState = (channel: any | null) => {
+  resetAssignmentFormState();
+  if (!channel) return;
+
+  assignmentFormState.primaryFiopUserId = channel.assignment?.primaryFiopUserId || undefined;
+  assignmentFormState.fiopCollaboratorUserIds = Array.isArray(channel.assignment?.fiopCollaboratorUserIds)
+    ? [...channel.assignment.fiopCollaboratorUserIds]
+    : [];
+  assignmentFormState.primaryFibdUserId = channel.assignment?.primaryFibdUserId || undefined;
+  assignmentFormState.fibdCollaboratorUserIds = Array.isArray(channel.assignment?.fibdCollaboratorUserIds)
+    ? [...channel.assignment.fibdCollaboratorUserIds]
+    : [];
+};
+const openAssignmentDrawer = (role: AssignmentLauncherRole) => {
+  if (!canManageAssignments.value || !isSupervisorCorridorAssignmentMode.value) return;
+
+  assignmentLauncherRole.value = role;
+  resetAssignmentDrawerFilters();
+  assignmentTargetChannelIds.value = [];
+  resetAssignmentFormState();
+  fieldConfigPopoverOpen.value = false;
+  setTimeout(() => {
+    assignmentDrawerOpen.value = true;
+  }, 0);
+};
+const handleAssignmentFieldAction = (field: DashboardFieldDefinition) => {
+  if (!isAssignmentColumnField(field)) return;
+  openAssignmentDrawer(field.key === 'fibdOwner' ? 'fibd' : 'fiop');
+};
+const handleAssignmentTargetChannelChange = (channelIds?: string[] | string) => {
+  setAssignmentTargetChannelIds(channelIds);
+};
+const handleResetAssignmentDrawerFilters = () => {
+  resetAssignmentDrawerFilters();
+};
+const closeAssignmentDrawer = () => {
+  assignmentDrawerOpen.value = false;
+  resetAssignmentDrawerFilters();
+  assignmentTargetChannelIds.value = [];
+  resetAssignmentFormState();
+};
+
+const ensurePrimaryOwnerIncluded = (values: string[], primaryUserId?: string) => (
+  [...new Set([...(values || []), primaryUserId].filter(Boolean) as string[])]
+);
+
+const persistAssignmentChanges = () => {
+  if (!canManageAssignments.value) return null;
+
+  const targetChannels = assignmentTargetChannels.value;
+  if (!targetChannels.length) {
+    message.warning('Select at least one corridor before saving.');
+    return null;
+  }
+
+  const timestamp = dayjs().format('YYYY-MM-DD HH:mm:ss');
+  if (assignmentLauncherRole.value === 'fiop' && !assignmentFormState.primaryFiopUserId) {
+    message.warning('Select a primary FIOP before saving.');
+    return null;
+  }
+  if (assignmentLauncherRole.value === 'fibd' && !assignmentFormState.primaryFibdUserId) {
+    message.warning('Select a primary FIBD before saving.');
+    return null;
+  }
+
+  const updatedChannels = targetChannels
+    .map((targetChannel) => (
+      assignmentLauncherRole.value === 'fiop'
+        ? store.updateChannelAssignment(targetChannel.id, {
+          primaryFiopUserId: assignmentFormState.primaryFiopUserId,
+          fiopCollaboratorUserIds: ensurePrimaryOwnerIncluded(
+            assignmentFormState.fiopCollaboratorUserIds,
+            assignmentFormState.primaryFiopUserId,
+          ),
+          updatedAt: timestamp,
+          updatedByUserId: store.currentUserId,
+        })
+        : store.updateChannelAssignment(targetChannel.id, {
+          primaryFibdUserId: assignmentFormState.primaryFibdUserId,
+          fibdCollaboratorUserIds: ensurePrimaryOwnerIncluded(
+            assignmentFormState.fibdCollaboratorUserIds,
+            assignmentFormState.primaryFibdUserId,
+          ),
+          updatedAt: timestamp,
+          updatedByUserId: store.currentUserId,
+        })
+    ))
+    .filter(Boolean);
+
+  if (!updatedChannels.length || updatedChannels.length !== targetChannels.length) {
+    message.error('Unable to update channel assignment.');
+    return null;
+  }
+
+  return updatedChannels.length;
+};
+const handleSaveAssignment = () => {
+  const updatedCount = persistAssignmentChanges();
+  if (!updatedCount) return;
+
+  message.success(`Updated ${assignmentRoleLabelMap[assignmentLauncherRole.value]} assignment for ${updatedCount} corridor${updatedCount > 1 ? 's' : ''}.`);
+  closeAssignmentDrawer();
 };
 
 // --- CSV 鐎电厧鍤粻妤佺《 (1:1 鐎靛綊缍?React 妞ゅ湱娲? ---
@@ -977,6 +1292,9 @@ const handleSubmitFieldEditor = () => {
   if (!trimmedLabel) {
     return message.warning('Field name is required.');
   }
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Field Name', value: fieldEditorState.label, max: INPUT_LIMITS.name },
+  ])) return;
 
   if (fieldEditorMode.value === 'create') {
     const targetMode = viewMode.value;
@@ -1031,6 +1349,10 @@ const handleCreateFieldGroup = () => {
   if (!trimmedName) {
     return message.warning('Group name is required.');
   }
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Group Name', value: groupCreationState.name, max: INPUT_LIMITS.name },
+  ])) return;
+
   if (!groupCreationState.fieldKeys.length) {
     return message.warning('Select at least one field.');
   }
@@ -1077,6 +1399,10 @@ const toggleFieldVisibility = (field: DashboardFieldDefinition) => {
   ));
 };
 const handleDeleteField = (field: DashboardFieldDefinition) => {
+  if (isAssignmentColumnField(field)) {
+    return message.warning('FIOP and FIBD system fields cannot be deleted.');
+  }
+
   if (currentFieldDefinitions.value.length <= 1) {
     return message.warning('At least one field must remain.');
   }
@@ -1143,6 +1469,10 @@ const handleSaveView = () => {
   if (!draftViewName.value.trim()) {
     return message.warning('Please enter a view name.');
   }
+  if (showTextLimitWarning(message.warning, [
+    { label: 'View Name', value: draftViewName.value, max: INPUT_LIMITS.name },
+  ])) return;
+
   if (sanitizedColumns.length === 0) {
     return message.warning('Select at least one column.');
   }
@@ -1210,7 +1540,12 @@ const handleDeleteView = (id: string) => {
     <a-space direction="vertical" size="large" class="w-full">
       <!-- 妞ゅ爼鍎撮幙宥勭稊閿?-->
       <div class="flex items-center gap-3 flex-wrap mb-1">
-        <a-button type="primary" @click="handleAddNew" class="bg-[#0284c7] border-none hover:bg-sky-600 h-[40px] px-5 rounded-lg font-bold flex items-center gap-2 shadow-sm">
+        <a-button
+          v-if="canCreateChannel"
+          type="primary"
+          @click="handleAddNew"
+          class="bg-[#0284c7] border-none hover:bg-sky-600 h-[40px] px-5 rounded-lg font-bold flex items-center gap-2 shadow-sm"
+        >
           <template #icon><plus-outlined /></template>
           New Corridor
         </a-button>
@@ -1275,6 +1610,7 @@ const handleDeleteView = (id: string) => {
                     <a-input
                       v-else-if="conditionNeedsValue(condition)"
                       :value="condition.value"
+                      :maxlength="INPUT_LIMITS.search"
                       :placeholder="getFilterConditionFieldConfig(condition)?.valuePlaceholder || 'Enter value'"
                       :disabled="!condition.fieldKey"
                       class="w-full fitrem-filter-value-input"
@@ -1344,8 +1680,22 @@ const handleDeleteView = (id: string) => {
                     >
                       <div class="min-w-0 flex-1">
                         <div class="truncate text-[13px] font-bold text-slate-700">{{ field.label }}</div>
-                        <div class="text-[11px] font-medium text-slate-400">
-                          {{ field.kind === 'custom' ? 'Custom field' : 'System field' }}
+                        <div class="mt-1 flex flex-wrap items-center gap-2">
+                          <span class="text-[11px] font-medium text-slate-400">
+                            {{ field.kind === 'custom' ? 'Custom field' : 'System field' }}
+                          </span>
+                          <span
+                            v-if="isAssignmentColumnField(field)"
+                            class="rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.14em] text-sky-700"
+                          >
+                            Assignment Column
+                          </span>
+                        </div>
+                        <div
+                          v-if="isAssignmentColumnField(field)"
+                          class="mt-1 text-[11px] font-medium text-sky-600"
+                        >
+                          {{ isSupervisorCorridorAssignmentMode ? 'Use Assign in menu.' : 'Assignment display column.' }}
                         </div>
                       </div>
                       <div class="flex items-center gap-1">
@@ -1368,9 +1718,18 @@ const handleDeleteView = (id: string) => {
                           </a-button>
                           <template #overlay>
                             <a-menu>
+                              <a-menu-item
+                                v-if="isAssignmentColumnField(field) && isSupervisorCorridorAssignmentMode"
+                                key="assign"
+                                @click="handleAssignmentFieldAction(field)"
+                              >
+                                Assign
+                              </a-menu-item>
                               <a-menu-item key="edit" @click="openEditFieldModal(field)">Edit field</a-menu-item>
                               <a-menu-item key="group" @click="openCreateGroupModal(field)">Create group</a-menu-item>
-                              <a-menu-item key="delete" danger @click="handleDeleteField(field)">Delete</a-menu-item>
+                              <a-menu-item key="delete" danger :disabled="isAssignmentColumnField(field)" @click="handleDeleteField(field)">
+                                Delete
+                              </a-menu-item>
                             </a-menu>
                           </template>
                         </a-dropdown>
@@ -1505,7 +1864,7 @@ const handleDeleteView = (id: string) => {
               </div>
               <a-form layout="vertical">
                 <a-form-item label="View Name">
-                  <a-input v-model:value="draftViewName" :placeholder="editorViewMode === 'corridor' ? 'e.g. My Corridor View' : 'e.g. APAC Matrix Focus'" />
+                  <a-input v-model:value="draftViewName" :maxlength="INPUT_LIMITS.name" :placeholder="editorViewMode === 'corridor' ? 'e.g. My Corridor View' : 'e.g. APAC Matrix Focus'" />
                 </a-form-item>
                 <div class="rounded-2xl border border-slate-100 bg-white px-4 py-3">
                   <div class="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400 mb-2">Current Snapshot</div>
@@ -1531,9 +1890,37 @@ const handleDeleteView = (id: string) => {
 
         <!-- 閻晠妯€鐟欏棗娴樼拋鍓х枂閹稿鎸?-->
 
+        <a-button
+          v-if="isFiSupervisor"
+          class="h-[40px] px-4 rounded-lg font-bold flex items-center gap-2 transition-all shadow-sm"
+          :class="pendingPricingApprovalCount > 0 ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-white border-slate-200 text-slate-600'"
+          @click="store.openPricingApprovalWorkspace()"
+        >
+          <template #icon><safety-certificate-outlined /></template>
+          Approval Queue ({{ pendingPricingApprovalCount }})
+        </a-button>
+
+        <a-button
+          v-if="isFiSupervisor"
+          class="h-[40px] px-4 rounded-lg font-bold flex items-center gap-2 transition-all shadow-sm"
+          :class="pendingLaunchApprovalCount > 0 ? 'bg-sky-50 border-sky-200 text-sky-700' : 'bg-white border-slate-200 text-slate-600'"
+          @click="store.openLaunchApprovalWorkspace()"
+        >
+          <template #icon><rocket-outlined /></template>
+          Launch Queue ({{ pendingLaunchApprovalCount }})
+        </a-button>
+
         <a-button class="h-[40px] px-4 rounded-lg font-bold flex items-center gap-2 transition-all bg-white border-slate-200 text-slate-600 shadow-sm" @click="handleExport">
           <template #icon><download-outlined /></template>
           Export CSV
+        </a-button>
+
+        <a-button
+          class="ml-auto h-[40px] px-4 rounded-lg font-bold flex items-center gap-2 transition-all bg-white border-slate-200 text-slate-600 shadow-sm hover:border-sky-500 hover:text-sky-600"
+          @click="contactModalOpen = true"
+        >
+          <template #icon><question-circle-outlined /></template>
+          Contact Us
         </a-button>
       </div>
 
@@ -1574,6 +1961,51 @@ const handleDeleteView = (id: string) => {
 
       <!-- 娑撹缍嬮崘鍛啇鐢啫鐪?-->
       <a-modal
+        v-model:open="contactModalOpen"
+        title="Contact Us"
+        :footer="null"
+        width="460px"
+      >
+        <div class="py-2">
+          <div class="mb-5 text-[14px] font-medium leading-6 text-slate-500">
+            If you are new to the FI System or need support, please contact us by email.
+          </div>
+
+          <div class="rounded-xl border border-slate-100 bg-slate-50 px-4 py-4">
+            <div class="mb-1 text-[12px] font-black uppercase tracking-[0.16em] text-slate-400">
+              Support Email
+            </div>
+            <a
+              :href="contactMailtoLink"
+              class="text-[15px] font-black text-sky-600 hover:text-sky-700"
+            >
+              {{ contactEmail }}
+            </a>
+          </div>
+
+          <div class="mt-4 rounded-xl bg-sky-50 px-4 py-3 text-[13px] font-semibold leading-5 text-sky-700">
+            Our team will reply within 12 hours after receiving your email.
+          </div>
+
+          <div class="mt-6 flex justify-end gap-3 border-t border-slate-100 pt-4">
+            <a-button
+              class="h-[36px] rounded-lg px-5 font-bold text-slate-600 border-slate-200"
+              @click="contactModalOpen = false"
+            >
+              Close
+            </a-button>
+            <a-button
+              type="primary"
+              class="h-[36px] rounded-lg px-5 font-bold bg-[#0284c7] border-none"
+              :href="contactMailtoLink"
+            >
+              Send Email
+            </a-button>
+          </div>
+        </div>
+      </a-modal>
+
+      <a-modal
         v-model:open="fieldEditorModalOpen"
         :title="fieldEditorMode === 'create' ? `Add ${currentModeLabel} Field` : 'Edit Field'"
         :ok-text="fieldEditorMode === 'create' ? 'Create Field' : 'Save Changes'"
@@ -1584,6 +2016,7 @@ const handleDeleteView = (id: string) => {
           <a-form-item label="Field Name">
             <a-input
               v-model:value="fieldEditorState.label"
+              :maxlength="INPUT_LIMITS.name"
               :placeholder="fieldEditorMode === 'create' ? 'e.g. Internal Note' : 'Enter field name'"
             />
           </a-form-item>
@@ -1607,7 +2040,7 @@ const handleDeleteView = (id: string) => {
       >
         <a-form layout="vertical" class="pt-4">
           <a-form-item label="Group Name">
-            <a-input v-model:value="groupCreationState.name" placeholder="e.g. Workflow Fields" />
+            <a-input v-model:value="groupCreationState.name" :maxlength="INPUT_LIMITS.name" placeholder="e.g. Workflow Fields" />
           </a-form-item>
           <a-form-item label="Fields in This Group">
             <a-checkbox-group v-model:value="groupCreationState.fieldKeys" class="flex flex-col gap-3">
@@ -1639,11 +2072,13 @@ const handleDeleteView = (id: string) => {
             <template #bodyCell="{ column, record, text }">
               <!-- Corridor Name 鐎规艾鍩?-->
               <template v-if="['channelName', 'corridorName'].includes(resolveColumnKey(column)) || resolveColumnSourceKey(column) === 'channelName'">
-                <div class="flex items-center gap-2">
-                  <div v-if="record.logo" class="w-6 h-6 rounded bg-gray-100 overflow-hidden flex-shrink-0">
-                    <img :src="record.logo" class="w-full h-full object-cover" />
+                <div class="flex items-center gap-3">
+                  <div class="flex items-center gap-2 min-w-0">
+                    <div v-if="record.logo" class="w-6 h-6 rounded bg-gray-100 overflow-hidden flex-shrink-0">
+                      <img :src="record.logo" class="w-full h-full object-cover" />
+                    </div>
+                    <span class="font-bold text-slate-900">{{ text }}</span>
                   </div>
-                  <span class="font-bold text-slate-900">{{ text }}</span>
                 </div>
               </template>
 
@@ -1692,12 +2127,12 @@ const handleDeleteView = (id: string) => {
               </template>
 
               <!-- 瀹搞儰缍斿ù浣哄Ц閹礁鐣鹃敓?(KYC, NDA, Contract, Pricing, Tech) -->
-              <template v-else-if="['complianceStatus', 'ndaStatus', 'contractStatus', 'pricingProposalStatus', 'techStatus'].includes(resolveColumnSourceKey(column))">
+              <template v-else-if="workflowStatusFieldKeySet.has(resolveColumnSourceKey(column))">
                 <a-tag v-if="text" :style="{
-                  backgroundColor: resolveColumnSourceKey(column) === 'complianceStatus'
+                  backgroundColor: isOnboardingStatusField(resolveColumnSourceKey(column))
                     ? getOnboardingStatusTheme(text).bg
                     : resolveLegalStatusTheme(resolveColumnSourceKey(column), text).bg,
-                  color: resolveColumnSourceKey(column) === 'complianceStatus'
+                  color: isOnboardingStatusField(resolveColumnSourceKey(column))
                     ? getOnboardingStatusTheme(text).text
                     : resolveLegalStatusTheme(resolveColumnSourceKey(column), text).text,
                   border: 'none',
@@ -1706,7 +2141,7 @@ const handleDeleteView = (id: string) => {
                   fontSize: '11px',
                   padding: '2px 10px'
                 }">
-                  {{ resolveColumnSourceKey(column) === 'complianceStatus' ? text : resolveLegalStatusLabel(resolveColumnSourceKey(column), text) }}
+                  {{ isOnboardingStatusField(resolveColumnSourceKey(column)) ? text : resolveLegalStatusLabel(resolveColumnSourceKey(column), text) }}
                 </a-tag>
                 <span v-else class="text-slate-300">-</span>
               </template>
@@ -1746,7 +2181,33 @@ const handleDeleteView = (id: string) => {
 
               <!-- FI Owner 鐎规艾鍩?-->
               <template v-else-if="resolveColumnSourceKey(column) === 'fiopOwner'">
-                <a-tag color="blue" class="rounded-full px-3">{{ text }}</a-tag>
+                <div class="flex items-center gap-2" @click.stop>
+                  <a-space :size="[6, 6]" wrap>
+                    <a-tag
+                      v-for="(name, index) in getAssignmentDisplayNames(record, 'fiop')"
+                      :key="`fiop-${record.id || record.channelId}-${name}-${index}`"
+                      :color="name === 'Unassigned' ? 'default' : 'blue'"
+                      class="rounded-full px-3"
+                    >
+                      {{ name }}
+                    </a-tag>
+                  </a-space>
+                </div>
+              </template>
+
+              <template v-else-if="resolveColumnSourceKey(column) === 'fibdOwner'">
+                <div class="flex items-center gap-2" @click.stop>
+                  <a-space :size="[6, 6]" wrap>
+                    <a-tag
+                      v-for="(name, index) in getAssignmentDisplayNames(record, 'fibd')"
+                      :key="`fibd-${record.id || record.channelId}-${name}-${index}`"
+                      :color="name === 'Unassigned' ? 'default' : 'cyan'"
+                      class="rounded-full px-3"
+                    >
+                      {{ name }}
+                    </a-tag>
+                  </a-space>
+                </div>
               </template>
             </template>
           </a-table>
@@ -1754,6 +2215,178 @@ const handleDeleteView = (id: string) => {
 
       </div>
     </a-space>
+
+    <a-drawer
+      v-model:open="assignmentDrawerOpen"
+      :title="assignmentDrawerTitle"
+      width="460"
+      :mask-closable="true"
+      @close="closeAssignmentDrawer"
+    >
+      <div class="space-y-6">
+        <a-form layout="vertical">
+          <div class="mb-2 flex items-center justify-between gap-3">
+            <div class="text-[12px] font-black uppercase tracking-[0.16em] text-slate-400">Filter Corridors</div>
+            <a-button
+              type="text"
+              size="small"
+              class="px-0 text-[12px] font-medium text-slate-400 hover:text-sky-600"
+              @click="handleResetAssignmentDrawerFilters"
+            >
+              Reset filters
+            </a-button>
+          </div>
+
+          <div>
+            <a-form-item v-if="assignmentLauncherRole === 'fiop'" label="Current FIOP">
+              <a-select
+                v-model:value="currentFiopFilterUserIds"
+                mode="multiple"
+                allow-clear
+                :max-tag-count="2"
+                option-filter-prop="label"
+                :options="currentFiopFilterOptions"
+                placeholder="Filter by primary FIOP"
+              />
+            </a-form-item>
+
+            <a-form-item v-else label="Current FIBD">
+              <a-select
+                v-model:value="currentFibdFilterUserIds"
+                mode="multiple"
+                allow-clear
+                :max-tag-count="2"
+                option-filter-prop="label"
+                :options="currentFibdFilterOptions"
+                placeholder="Filter by primary FIBD"
+              />
+            </a-form-item>
+          </div>
+
+          <a-form-item label="Corridor">
+            <a-select
+              v-model:value="assignmentTargetChannelIds"
+              mode="multiple"
+              show-search
+              allow-clear
+              :max-tag-count="3"
+              option-filter-prop="label"
+              :options="assignmentTargetChannelOptions"
+              placeholder="Search and select corridors"
+              @change="handleAssignmentTargetChannelChange"
+            />
+            <div class="mt-2 text-[12px] font-medium text-slate-400">
+              {{ assignmentFilteredCorridors.length }} corridor{{ assignmentFilteredCorridors.length === 1 ? '' : 's' }} match the current drawer filters.
+            </div>
+          </a-form-item>
+
+          <template v-if="assignmentTargetChannels.length">
+            <div class="mb-6 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+              <div class="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">
+                {{ assignmentTargetChannels.length === 1 ? 'Selected Corridor' : 'Selected Corridors' }}
+              </div>
+              <template v-if="assignmentTargetChannel">
+                <div class="mt-2 text-[16px] font-black text-slate-900">{{ assignmentTargetChannel.channelName }}</div>
+                <div class="mt-1 text-[12px] font-medium text-slate-500">{{ assignmentTargetChannel.channelId }}</div>
+                <div class="mt-4">
+                  <div v-if="assignmentLauncherRole === 'fiop'" class="rounded-2xl border border-slate-200 bg-white px-3 py-3">
+                    <div class="text-[11px] font-black uppercase tracking-[0.14em] text-slate-400">Current FIOP</div>
+                    <a-space class="mt-2" :size="[6, 6]" wrap>
+                      <a-tag
+                        v-for="(name, index) in getAssignmentDisplayNames(assignmentTargetChannel, 'fiop')"
+                        :key="`assignment-current-fiop-${assignmentTargetChannel.id}-${name}-${index}`"
+                        :color="name === 'Unassigned' ? 'default' : 'blue'"
+                        class="rounded-full px-3"
+                      >
+                        {{ name }}
+                      </a-tag>
+                    </a-space>
+                  </div>
+
+                  <div v-else class="rounded-2xl border border-slate-200 bg-white px-3 py-3">
+                    <div class="text-[11px] font-black uppercase tracking-[0.14em] text-slate-400">Current FIBD</div>
+                    <a-space class="mt-2" :size="[6, 6]" wrap>
+                      <a-tag
+                        v-for="(name, index) in getAssignmentDisplayNames(assignmentTargetChannel, 'fibd')"
+                        :key="`assignment-current-fibd-${assignmentTargetChannel.id}-${name}-${index}`"
+                        :color="name === 'Unassigned' ? 'default' : 'cyan'"
+                        class="rounded-full px-3"
+                      >
+                        {{ name }}
+                      </a-tag>
+                    </a-space>
+                  </div>
+                </div>
+              </template>
+              <template v-else>
+                <div class="mt-2 text-[16px] font-black text-slate-900">{{ assignmentTargetChannels.length }} corridors selected</div>
+                <a-space class="mt-3" :size="[6, 6]" wrap>
+                  <a-tag
+                    v-for="channel in assignmentTargetChannels.slice(0, 3)"
+                    :key="`assignment-summary-${channel.id}`"
+                    class="rounded-full px-3"
+                  >
+                    {{ channel.channelName }}
+                  </a-tag>
+                  <a-tag v-if="assignmentTargetChannels.length > 3" class="rounded-full px-3">
+                    +{{ assignmentTargetChannels.length - 3 }} more
+                  </a-tag>
+                </a-space>
+                <div class="mt-3 text-[12px] font-medium text-slate-500">
+                  {{ assignmentLauncherRole === 'fiop'
+                    ? 'Current FIOP is shown when a single corridor is selected.'
+                    : 'Current FIBD is shown when a single corridor is selected.' }}
+                </div>
+              </template>
+            </div>
+
+            <template v-if="assignmentLauncherRole === 'fiop'">
+              <a-form-item label="Primary FIOP">
+                <a-select
+                  v-model:value="assignmentFormState.primaryFiopUserId"
+                  :options="fiopUserOptions"
+                  placeholder="Select primary FIOP"
+                />
+              </a-form-item>
+
+              <a-form-item label="FIOP Collaborators" class="mb-0">
+                <a-select
+                  v-model:value="assignmentFormState.fiopCollaboratorUserIds"
+                  mode="multiple"
+                  :options="fiopUserOptions"
+                  placeholder="Add FIOP collaborators"
+                />
+              </a-form-item>
+            </template>
+
+            <template v-else>
+              <a-form-item label="Primary FIBD">
+                <a-select
+                  v-model:value="assignmentFormState.primaryFibdUserId"
+                  :options="fibdUserOptions"
+                  placeholder="Select primary FIBD"
+                />
+              </a-form-item>
+
+              <a-form-item label="FIBD Collaborators" class="mb-0">
+                <a-select
+                  v-model:value="assignmentFormState.fibdCollaboratorUserIds"
+                  mode="multiple"
+                  :options="fibdUserOptions"
+                  placeholder="Add FIBD collaborators"
+                />
+              </a-form-item>
+            </template>
+          </template>
+        </a-form>
+
+        <div class="flex justify-end gap-3 border-t border-slate-100 pt-5">
+          <a-button @click="closeAssignmentDrawer">Cancel</a-button>
+          <a-button type="primary" class="bg-sky-600 border-none" @click="handleSaveAssignment">Save Assignment</a-button>
+        </div>
+      </div>
+    </a-drawer>
+
   </div>
 </template>
 

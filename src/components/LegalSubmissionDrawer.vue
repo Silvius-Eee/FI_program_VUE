@@ -4,6 +4,7 @@ import {
   CloseOutlined,
 } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
+import { INPUT_LIMITS, showTextLimitWarning } from '../constants/inputLimits';
 
 const props = defineProps<{
   open: boolean;
@@ -72,6 +73,11 @@ const handleSubmit = () => {
     message.warning('Please provide context or remarks for the reviewers.');
     return;
   }
+  if (showTextLimitWarning(message.warning, [
+    { label: legalFormCopy.value.linkLabel, value: formState.documentLink, max: INPUT_LIMITS.url },
+    { label: legalFormCopy.value.remarksLabel, value: formState.remarks, max: INPUT_LIMITS.note },
+  ])) return;
+
   message.success(`${legalDocumentTitle.value} request sent to Legal Department`);
   emit('submit', { ...formState, docType: props.docType });
   emit('update:open', false);
@@ -155,6 +161,7 @@ watch(() => props.open, (newVal) => {
               </template>
               <a-input 
                 v-model:value="formState.documentLink" 
+                :maxlength="INPUT_LIMITS.url"
                 :placeholder="legalFormCopy.linkPlaceholder" 
                 class="h-[48px] rounded-xl border-slate-200 mt-2" 
               />
@@ -168,7 +175,9 @@ watch(() => props.open, (newVal) => {
               </template>
               <a-textarea 
                 v-model:value="formState.remarks" 
+                :maxlength="INPUT_LIMITS.note"
                 :rows="4" 
+                show-count
                 :placeholder="legalFormCopy.remarksPlaceholder"
                 class="rounded-xl border-slate-200 mt-2" 
               />

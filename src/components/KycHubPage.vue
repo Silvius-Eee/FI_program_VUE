@@ -4,26 +4,32 @@ import dayjs from 'dayjs';
 import { message, Modal } from 'ant-design-vue';
 import {
   ArrowLeftOutlined,
+  DeleteOutlined,
   EditOutlined,
   FileSearchOutlined,
   SendOutlined,
 } from '@ant-design/icons-vue';
 import OnboardingHistoryTimeline from './OnboardingHistoryTimeline.vue';
 import { useAppStore } from '../stores/app';
+import { contactMethodOptions } from '../constants/channelOptions';
 import {
   applyOnboardingSubmission,
   createEmptyOnboardingWorkflow,
   getChannelOnboardingWorkflow,
+  getComplianceHandoffStatus,
   getOnboardingCurrentVersion,
+  getOnboardingRevocableAction,
   getOnboardingTimelineEvents,
   getOnboardingStatusLabel,
   getOnboardingStatusTheme,
   getOnboardingTrackTitle,
+  isOnboardingFiActionStatus,
+  revokeOnboardingPendingHandoff,
   type OnboardingAttachmentMeta,
-  type OnboardingActivityEntry,
   type OnboardingTrack,
   type OnboardingWorkflow,
 } from '../constants/onboarding';
+import { INPUT_LIMITS, showTextLimitWarning } from '../constants/inputLimits';
 
 const store = useAppStore();
 const uploadFileList = ref<any[]>([]);
@@ -48,19 +54,32 @@ const onboardingEntityOptions = [
   'QuantumWing Limited (HK)',
 ];
 
-const contactMethodOptions = [
-  { label: 'Email', value: 'Email' },
-  { label: 'Slack', value: 'Slack' },
-  { label: 'WeChat', value: 'WeChat' },
-  { label: 'Telegram', value: 'Telegram' },
-  { label: 'Phone', value: 'Phone' },
-  { label: 'Other', value: 'Other' },
-];
+const validContactMethodValues = new Set(contactMethodOptions.map((option) => option.value));
+
+const normalizeContactMethod = (value: unknown, fallback: unknown = 'Email') => {
+  const candidate = String(value || '').trim();
+  if (validContactMethodValues.has(candidate)) return candidate;
+
+  const fallbackCandidate = String(fallback || '').trim();
+  return validContactMethodValues.has(fallbackCandidate) ? fallbackCandidate : 'Email';
+};
+
+const contactDetailPlaceholder = computed(() => (
+  contactMethodOptions.find((option) => option.value === draft.contactMethod)?.placeholder || 'Contact detail'
+));
 
 const channel = computed(() => store.selectedChannel || null);
 const activeTrack = computed<OnboardingTrack>({
   get: () => store.kycHubTrack,
   set: (value) => store.setKycHubTrack(value),
+});
+const activeTrackTab = computed({
+  get: () => activeTrack.value,
+  set: (value: string) => {
+    if (value === 'wooshpay' || value === 'corridor') {
+      activeTrack.value = value;
+    }
+  },
 });
 
 const workflow = computed<OnboardingWorkflow>(() => (
@@ -72,47 +91,42 @@ const statusLabel = computed(() => getOnboardingStatusLabel(activeTrack.value, w
 const statusTheme = computed(() => getOnboardingStatusTheme(workflow.value.status));
 const currentVersion = computed(() => getOnboardingCurrentVersion(activeTrack.value, workflow.value));
 const timelineEvents = computed(() => getOnboardingTimelineEvents(activeTrack.value, workflow.value));
-const latestSubmissionEvent = computed<OnboardingActivityEntry | null>(() => (
-  timelineEvents.value.find((entry) => entry.eventType === 'submission' || entry.eventType === 'resubmission') || null
+const handoffStatus = computed(() => getComplianceHandoffStatus(activeTrack.value));
+const revocableAction = computed(() => (
+  getOnboardingRevocableAction(activeTrack.value, workflow.value, 'FIOP', store.currentUserName)
 ));
-const latestReviewerPreparationEvent = computed<OnboardingActivityEntry | null>(() => (
-  timelineEvents.value.find((entry) => entry.actorRole === 'reviewer' && entry.status === 'self_preparation') || null
-));
+const permissions = computed(() => {
+  const rawPermissions = (workflow.value as any)?.permissions || {};
+  return {
+    canSubmit: rawPermissions.canSubmit ?? store.canOperateFiWork(channel.value),
+  };
+});
 
-const isClosed = computed(() => workflow.value.status === 'completed' || workflow.value.status === 'no_need');
-const canSubmitSupplement = computed(() => !isClosed.value);
+const canSubmitSupplement = computed(() => permissions.value.canSubmit);
 const isEditRequired = computed(() => {
   if (workflow.value.status === 'not_started') return true;
-  if (workflow.value.status !== 'self_preparation') return false;
-  if (!latestReviewerPreparationEvent.value) return false;
-  if (!latestSubmissionEvent.value) return true;
-
-  return new Date(latestReviewerPreparationEvent.value.time).getTime() >= new Date(latestSubmissionEvent.value.time).getTime();
+  return isOnboardingFiActionStatus(activeTrack.value, workflow.value.status);
 });
 const canEditCurrentTrack = computed(() => canSubmitSupplement.value && (isEditRequired.value || isEditing.value));
 const isSupplementMode = computed(() => (
-  workflow.value.status !== 'self_preparation' && currentVersion.value > 0
+  workflow.value.status !== 'not_started' && !isEditRequired.value && currentVersion.value > 0
 ));
 const formDescription = computed(() => (
   activeTrack.value === 'corridor'
     ? isSupplementMode.value
-      ? 'Refresh only the corridor contact and remarks that changed since the last submission.'
-      : 'Fill in the corridor contact details and the note Compliance should read before reviewing this track.'
+      ? 'Refresh only the corridor contact, remarks, and attachments that changed since the last submission.'
+      : 'Fill in the corridor contact details, note, and attachments Compliance should review on this track.'
     : isSupplementMode.value
       ? 'Add only the updated entities, link, remarks, and attachments that changed since the last submission.'
       : 'Fill in the entities, supporting link, note, and attachments that Compliance should review on this track.'
 ));
-const historyTitle = computed(() => (
-  activeTrack.value === 'corridor' ? 'Corridor onboarding timeline' : `${trackTitle.value} history`
-));
+const historyTitle = computed(() => trackTitle.value);
 const historyDescription = computed(() => (
-  activeTrack.value === 'corridor'
-    ? 'Follow every submission, supplement, and review handoff on the same shared timeline.'
-    : 'Use the shared timeline to confirm what FI submitted, what Compliance asked for, and when the status changed.'
+  'Use the shared timeline to confirm what FI submitted, what Compliance asked for, and when the status changed.'
 ));
 
 const formTitle = computed(() => (
-  workflow.value.status === 'self_preparation' && isEditRequired.value
+  workflow.value.status === handoffStatus.value && isEditRequired.value
     ? 'Update what Compliance asked for'
     : currentVersion.value > 0
       ? 'Update the submitted package'
@@ -120,7 +134,7 @@ const formTitle = computed(() => (
 ));
 
 const submitButtonLabel = computed(() => (
-  workflow.value.status === 'self_preparation' && isEditRequired.value
+  workflow.value.status === handoffStatus.value && isEditRequired.value
     ? 'Submit Update'
     : currentVersion.value > 0
       ? 'Send Supplement'
@@ -134,13 +148,6 @@ const serializedAttachments = computed<OnboardingAttachmentMeta[]>(() => uploadF
   size: Number(file.size || 0),
   type: String(file.type || ''),
 })));
-
-const permissions = computed(() => {
-  const rawPermissions = (workflow.value as any)?.permissions || {};
-  return {
-    canSubmit: rawPermissions.canSubmit ?? store.role === 'FI',
-  };
-});
 
 const hasText = (value: unknown) => String(value ?? '').trim().length > 0;
 
@@ -157,7 +164,8 @@ const hasMeaningfulDraft = (track: OnboardingTrack, value: Record<string, any> |
   if (track === 'corridor') {
     return hasCorridorContactDraft(value)
       || hasText(value.handoffNote)
-      || hasText(value.notes);
+      || hasText(value.notes)
+      || (Array.isArray(value.attachments) && value.attachments.length);
   }
 
   return Boolean(
@@ -184,7 +192,7 @@ const syncDraft = () => {
   draft.documentLink = String(savedDraft.documentLink || submission.documentLink || '');
   draft.notes = String(savedDraft.notes || submission.notes || '');
   draft.contactName = String(corridorContactSource.contactName || channel.value.pocName || '');
-  draft.contactMethod = String(corridorContactSource.contactMethod || channel.value.pocMethod || 'Email');
+  draft.contactMethod = normalizeContactMethod(corridorContactSource.contactMethod, channel.value.pocMethod);
   draft.contactValue = String(corridorContactSource.contactValue || channel.value.pocDetail || '');
   draft.handoffNote = String(savedDraft.handoffNote || savedDraft.notes || submission.handoffNote || submission.notes || '');
   const attachments = Array.isArray(savedDraft.attachments) && savedDraft.attachments.length
@@ -232,7 +240,7 @@ watch(
       documentLink: nextDraft.documentLink,
       notes: nextDraft.notes,
       contactName: nextDraft.contactName,
-      contactMethod: nextDraft.contactMethod,
+      contactMethod: normalizeContactMethod(nextDraft.contactMethod, channel.value?.pocMethod),
       contactValue: nextDraft.contactValue,
       handoffNote: nextDraft.handoffNote,
       attachments: nextDraft.attachments,
@@ -248,16 +256,43 @@ watch(
   { deep: true },
 );
 
-const preventUpload = () => false;
+const isAllowedAttachment = (file: any) => {
+  const type = String(file?.type || '').toLowerCase();
+  const name = String(file?.name || '').toLowerCase();
+  return type === 'application/pdf'
+    || type.startsWith('image/')
+    || ['.pdf', '.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif'].some((extension) => name.endsWith(extension));
+};
+
+const beforeAttachmentUpload = (file: any) => {
+  if (!isAllowedAttachment(file)) {
+    message.warning('Only PDF and image files are supported.');
+    return false;
+  }
+  return false;
+};
 
 const handleUploadChange = (info: any) => {
-  uploadFileList.value = (info.fileList || []).map((file: any) => ({
-    uid: String(file.uid),
-    name: String(file.name || 'Attachment'),
-    status: 'done',
-    size: Number(file.size || 0),
-    type: String(file.type || ''),
-  }));
+  uploadFileList.value = (info.fileList || [])
+    .filter((file: any) => isAllowedAttachment(file))
+    .map((file: any) => ({
+      uid: String(file.uid),
+      name: String(file.name || 'Attachment'),
+      status: 'done',
+      size: Number(file.size || 0),
+      type: String(file.type || ''),
+    }));
+};
+
+const removeAttachment = (uid: string) => {
+  uploadFileList.value = uploadFileList.value.filter((file) => String(file.uid) !== String(uid));
+};
+
+const formatAttachmentSize = (size: number) => {
+  if (!size) return '';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
 };
 
 const validateDraft = () => {
@@ -275,6 +310,11 @@ const validateDraft = () => {
       message.warning('Add a document link or at least one attachment before submitting.');
       return false;
     }
+    if (showTextLimitWarning(message.warning, [
+      { label: 'Link', value: draft.documentLink, max: INPUT_LIMITS.url },
+      { label: 'Remarks', value: draft.notes, max: INPUT_LIMITS.note },
+    ])) return false;
+
     return true;
   }
 
@@ -282,6 +322,11 @@ const validateDraft = () => {
     message.warning('Fill in the primary corridor contact before submitting.');
     return false;
   }
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Contact Name', value: draft.contactName, max: INPUT_LIMITS.contactName },
+    { label: 'Contact Detail', value: draft.contactValue, max: INPUT_LIMITS.contactValue },
+    { label: 'Remarks', value: draft.handoffNote, max: INPUT_LIMITS.note },
+  ])) return false;
 
   return true;
 };
@@ -292,12 +337,12 @@ const handleSubmit = () => {
   const payload = activeTrack.value === 'corridor'
     ? {
         contactName: draft.contactName,
-        contactMethod: draft.contactMethod,
+        contactMethod: normalizeContactMethod(draft.contactMethod, channel.value.pocMethod),
         contactValue: draft.contactValue,
         handoffNote: draft.handoffNote,
         notes: draft.handoffNote,
         documentLink: '',
-        attachments: [],
+        attachments: serializedAttachments.value,
       }
     : {
         entities: [...draft.entities],
@@ -312,7 +357,7 @@ const handleSubmit = () => {
     okText: submitButtonLabel.value,
     onOk: () => {
       const timestamp = dayjs().format('YYYY-MM-DD HH:mm:ss');
-      const actor = store.role === 'FI' ? 'Current User' : 'Submitter';
+      const actor = store.currentUserName;
       const updated = {
         ...applyOnboardingSubmission(
           channel.value,
@@ -333,15 +378,31 @@ const handleSubmit = () => {
       };
       if (activeTrack.value === 'corridor') {
         updated.pocName = draft.contactName;
-        updated.pocMethod = draft.contactMethod;
+        updated.pocMethod = normalizeContactMethod(draft.contactMethod, channel.value.pocMethod);
         updated.pocDetail = draft.contactValue;
       }
       store.updateChannel(updated);
       store.clearKycHubDraft(channel.value.id, activeTrack.value);
+      syncDraft();
+      isEditing.value = false;
       message.success(`${trackTitle.value} submitted to Compliance.`);
-      store.closeKycSubmit();
     },
   });
+};
+
+const handleRevoke = () => {
+  if (!channel.value || !revocableAction.value) return;
+  const timestamp = dayjs().format('YYYY-MM-DD HH:mm:ss');
+  store.updateChannel(
+    revokeOnboardingPendingHandoff(
+      channel.value,
+      activeTrack.value,
+      'FIOP',
+      store.currentUserName,
+      timestamp,
+    ),
+  );
+  message.success(`${trackTitle.value} send revoked.`);
 };
 
 const openEditMode = () => {
@@ -381,20 +442,21 @@ const openEditMode = () => {
                   {{ statusLabel }}
                 </a-tag>
               </div>
+              <p class="mt-3 mb-0 text-[13px] font-medium leading-relaxed text-slate-500">
+                Use this KYC workbench to prepare each onboarding track, follow Compliance feedback, and keep status updates for this corridor in one place.
+              </p>
             </div>
-
-            <a-segmented
-              v-model:value="activeTrack"
-              class="kyc-track-switch"
-              :options="[
-                { value: 'wooshpay', label: 'WooshPay onboarding' },
-                { value: 'corridor', label: 'Corridor onboarding' },
-              ]"
-            />
           </div>
         </section>
 
-        <section>
+        <section class="rounded-[28px] border border-slate-200 bg-white p-6 shadow-[0_24px_54px_-34px_rgba(15,23,42,0.3)]">
+          <a-tabs v-model:activeKey="activeTrackTab" class="kyc-track-tabs">
+            <a-tab-pane key="wooshpay" tab="WooshPay onboarding" />
+            <a-tab-pane key="corridor" tab="Corridor onboarding" />
+          </a-tabs>
+        </section>
+
+        <section class="grid gap-5 xl:grid-cols-[minmax(0,1.08fr)_minmax(340px,0.92fr)]">
           <article class="rounded-[28px] border border-slate-200 bg-white p-6 shadow-[0_24px_54px_-34px_rgba(15,23,42,0.3)]">
             <div class="flex flex-wrap items-start justify-between gap-4">
               <div>
@@ -406,9 +468,9 @@ const openEditMode = () => {
               </div>
 
               <a-tag
-                :style="{ backgroundColor: canSubmitSupplement ? '#f5f3ff' : '#f8fafc', color: canSubmitSupplement ? '#7c3aed' : '#475569', border: 'none', borderRadius: '999px', fontWeight: 800, padding: '6px 14px' }"
+                :style="{ backgroundColor: statusTheme.bg, color: statusTheme.text, border: 'none', borderRadius: '999px', fontWeight: 800, padding: '6px 14px' }"
               >
-                {{ isEditRequired ? 'Action Required' : canSubmitSupplement ? 'Supplement Allowed' : 'Read Only' }}
+                {{ statusLabel }}
               </a-tag>
             </div>
 
@@ -421,6 +483,7 @@ const openEditMode = () => {
                       <div class="text-[12px] font-bold text-slate-500">Contact Name</div>
                       <a-input
                         v-model:value="draft.contactName"
+                        :maxlength="INPUT_LIMITS.contactName"
                         class="mt-2"
                         :readonly="!canEditCurrentTrack"
                         :class="!canEditCurrentTrack ? 'bg-white/70' : 'bg-white'"
@@ -440,10 +503,11 @@ const openEditMode = () => {
                       <div class="text-[12px] font-bold text-slate-500">Contact Detail</div>
                       <a-input
                         v-model:value="draft.contactValue"
+                        :maxlength="INPUT_LIMITS.contactValue"
                         class="mt-2"
                         :readonly="!canEditCurrentTrack"
                         :class="!canEditCurrentTrack ? 'bg-white/70' : 'bg-white'"
-                        placeholder="Email address, Slack handle, phone number, or other direct channel"
+                        :placeholder="contactDetailPlaceholder"
                       />
                     </div>
                   </div>
@@ -453,7 +517,9 @@ const openEditMode = () => {
                   <div class="text-[12px] font-black uppercase tracking-[0.16em] text-slate-400">Remarks</div>
                   <a-textarea
                     v-model:value="draft.handoffNote"
+                    :maxlength="INPUT_LIMITS.note"
                     :rows="6"
+                    show-count
                     class="mt-3"
                     :readonly="!canEditCurrentTrack"
                     :class="!canEditCurrentTrack ? 'bg-white/70' : 'bg-white'"
@@ -487,6 +553,7 @@ const openEditMode = () => {
                   <div class="text-[12px] font-black uppercase tracking-[0.16em] text-slate-400">Link</div>
                   <a-input
                     v-model:value="draft.documentLink"
+                    :maxlength="INPUT_LIMITS.url"
                     class="mt-3"
                     :readonly="!canEditCurrentTrack"
                     :class="!canEditCurrentTrack ? 'bg-white/70' : 'bg-white'"
@@ -498,7 +565,9 @@ const openEditMode = () => {
                   <div class="text-[12px] font-black uppercase tracking-[0.16em] text-slate-400">Remarks</div>
                   <a-textarea
                     v-model:value="draft.notes"
+                    :maxlength="INPUT_LIMITS.note"
                     :rows="6"
+                    show-count
                     class="mt-3"
                     :readonly="!canEditCurrentTrack"
                     :class="!canEditCurrentTrack ? 'bg-white/70' : 'bg-white'"
@@ -506,40 +575,53 @@ const openEditMode = () => {
                   />
                 </div>
 
-                <div class="rounded-[20px] border border-slate-200 bg-slate-50/70 p-5">
-                  <div class="text-[12px] font-black uppercase tracking-[0.16em] text-slate-400">Attachments</div>
-                  <a-upload-dragger
-                    class="kyc-submit-upload mt-4"
-                    multiple
-                    :disabled="!canEditCurrentTrack"
-                    :before-upload="preventUpload"
-                    :file-list="uploadFileList"
-                    :show-upload-list="false"
-                    @change="handleUploadChange"
-                  >
-                    <div class="flex flex-col items-center gap-3 py-4">
-                      <div class="flex h-12 w-12 items-center justify-center rounded-2xl bg-sky-500/10 text-sky-600">
-                        <file-search-outlined class="text-[18px]" />
-                      </div>
-                      <div class="text-[15px] font-black text-slate-900">Drop files here or select attachments</div>
-                      <div class="text-[12px] font-medium text-slate-400">Files are stored as metadata in this prototype.</div>
-                    </div>
-                  </a-upload-dragger>
+              </template>
 
-                  <div v-if="serializedAttachments.length" class="mt-4 space-y-3">
-                    <div
-                      v-for="file in serializedAttachments"
-                      :key="file.uid"
-                      class="rounded-[16px] border border-slate-200 bg-white px-4 py-3"
-                    >
+              <div class="rounded-[20px] border border-slate-200 bg-slate-50/70 p-5">
+                <div class="text-[12px] font-black uppercase tracking-[0.16em] text-slate-400">Attachments</div>
+                <a-upload-dragger
+                  class="kyc-submit-upload mt-4"
+                  accept=".pdf,image/*"
+                  multiple
+                  :disabled="!canEditCurrentTrack"
+                  :before-upload="beforeAttachmentUpload"
+                  :file-list="uploadFileList"
+                  :show-upload-list="false"
+                  @change="handleUploadChange"
+                >
+                  <div class="flex flex-col items-center gap-3 py-4">
+                    <div class="flex h-12 w-12 items-center justify-center rounded-2xl bg-sky-500/10 text-sky-600">
+                      <file-search-outlined class="text-[18px]" />
+                    </div>
+                    <div class="text-[15px] font-black text-slate-900">Drop PDF or image files here</div>
+                    <div class="text-[12px] font-medium text-slate-400">PDF and photo files are stored as metadata in this prototype.</div>
+                  </div>
+                </a-upload-dragger>
+
+                <div v-if="serializedAttachments.length" class="mt-4 space-y-3">
+                  <div
+                    v-for="file in serializedAttachments"
+                    :key="file.uid"
+                    class="flex items-center justify-between gap-3 rounded-[16px] border border-slate-200 bg-white px-4 py-3"
+                  >
+                    <div class="min-w-0 flex-1">
                       <div class="truncate text-[13px] font-black text-slate-900">{{ file.name }}</div>
                       <div class="mt-1 text-[11px] font-semibold text-slate-400">
-                        {{ file.type || 'Unknown type' }}<span v-if="file.size"> / {{ file.size }} bytes</span>
+                        {{ file.type || 'Unknown type' }}<span v-if="file.size"> / {{ formatAttachmentSize(file.size) }}</span>
                       </div>
                     </div>
+                    <a-button
+                      v-if="canEditCurrentTrack"
+                      type="text"
+                      danger
+                      class="shrink-0"
+                      @click="removeAttachment(file.uid)"
+                    >
+                      <template #icon><delete-outlined /></template>
+                    </a-button>
                   </div>
                 </div>
-              </template>
+              </div>
 
               <div v-if="canEditCurrentTrack" class="flex justify-center pt-1">
                 <a-button
@@ -565,17 +647,15 @@ const openEditMode = () => {
               </div>
 
               <div v-else class="text-[13px] font-semibold text-slate-400">
-                No further FI action is expected on this track.
+                You do not have permission to submit on this track.
               </div>
             </div>
           </article>
-        </section>
 
-        <section>
           <article class="rounded-[28px] border border-slate-200 bg-white p-6 shadow-[0_24px_54px_-34px_rgba(15,23,42,0.3)]">
             <div class="flex flex-wrap items-start justify-between gap-4">
               <div>
-                <div class="text-[12px] font-black uppercase tracking-[0.18em] text-slate-400">Track history</div>
+                <div class="text-[12px] font-black uppercase tracking-[0.18em] text-slate-400">KYC Timeline</div>
                 <h3 class="mt-2 mb-0 text-[22px] font-black text-slate-950">{{ historyTitle }}</h3>
                 <p class="mt-2 mb-0 text-[13px] font-medium leading-relaxed text-slate-500">
                   {{ historyDescription }}
@@ -587,8 +667,10 @@ const openEditMode = () => {
               <OnboardingHistoryTimeline
                 :events="timelineEvents"
                 :track="activeTrack"
+                :revocable-action="revocableAction"
                 empty-title="No history yet"
-                empty-description="This track has not been submitted yet."
+                empty-description="This track has not entered the KYC workflow for this corridor."
+                @revoke="handleRevoke"
               />
             </div>
           </article>
@@ -606,15 +688,30 @@ const openEditMode = () => {
     linear-gradient(180deg, #faf7ff 0%, #f8fafc 42%, #f8fafc 100%);
 }
 
-.kyc-track-switch {
-  background: #f5f3ff;
-  border: 1px solid #ddd6fe;
-  padding: 4px;
+.kyc-track-tabs :deep(.ant-tabs-nav) {
+  margin-bottom: 0;
 }
 
-.kyc-track-switch :deep(.ant-segmented-item-selected) {
-  color: #8256fc !important;
+.kyc-track-tabs :deep(.ant-tabs-tab) {
+  padding: 14px 2px 16px;
+  margin: 0 24px 0 0;
+  font-size: 14px;
   font-weight: 800;
+  color: #64748b;
+}
+
+.kyc-track-tabs :deep(.ant-tabs-tab:hover) {
+  color: #0f172a;
+}
+
+.kyc-track-tabs :deep(.ant-tabs-tab-active .ant-tabs-tab-btn) {
+  color: #8256fc !important;
+}
+
+.kyc-track-tabs :deep(.ant-tabs-ink-bar) {
+  background: #8256fc;
+  height: 4px;
+  border-radius: 999px 999px 0 0;
 }
 
 .kyc-submit-upload :deep(.ant-upload) {

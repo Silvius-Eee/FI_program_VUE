@@ -1,17 +1,38 @@
+import {
+  createHandoffLifecycle,
+  createNormalLifecycle,
+  createPendingHandoff,
+  createTerminalDecisionLifecycle,
+  getRevocableAction,
+  isLegacyRevocationCopy,
+  isPendingHandoffActive,
+  markLifecycleConsumed,
+  markLifecycleRevoked,
+  normalizePendingHandoff,
+  normalizeTerminalDecisionMeta,
+  normalizeTimelineLifecycle,
+  recordTerminalDecision,
+  revokeTerminalDecision,
+  type PendingHandoff,
+  type RevocableAction,
+  type TerminalDecisionMeta,
+  type TimelineLifecycle,
+  type WorkflowRole,
+} from './workflowLifecycle';
+
 export type WorkflowStatusTheme = {
   bg: string;
   text: string;
 };
 
-export type LegalDocType = 'NDA' | 'MSA';
+export type LegalDocType = 'NDA' | 'MSA' | 'OTHER_ATTACHMENTS';
 export type LegalActorRole = 'FIOP' | 'Legal';
 export type LegalQueueGroup = 'legal_pending' | 'external_pending' | 'completed' | 'no_need' | 'inactive';
-export type LegalQueueSubStatus = 'all' | 'Under our review' | 'Pending our signature' | 'Under Corridor review' | 'Pending Corridor signature';
+export type LegalQueueSubStatus = 'all' | 'Under our review' | 'Under legal review' | 'Under Corridor review' | 'Pending Corridor signature';
 
 type CommonEditableLegalStatus =
   | 'Under our review'
   | 'Under Corridor review'
-  | 'Pending our signature'
   | 'Pending Corridor signature'
   | 'Completed';
 
@@ -27,6 +48,10 @@ export type LegalAttachment = {
   status: string;
   size: number;
   type: string;
+  storageId?: string;
+  url?: string;
+  downloadUrl?: string;
+  urlSessionId?: string;
 };
 
 export type LegalRequestPacket = {
@@ -45,41 +70,77 @@ export type LegalStatusHistoryEntry = {
   actorName: string;
   fromStatus: LegalStatusValue | null;
   toStatus: LegalStatusValue;
+  displayStatus?: LegalStatusValue;
   note: string;
   documentLink: string;
   attachments: LegalAttachment[];
+  requestPacket?: LegalRequestPacket | null;
+  title?: string;
+  lifecycle?: TimelineLifecycle;
+  terminalDecision?: TerminalDecisionMeta | null;
 };
 
 type LegalStatusFieldKeys = {
-  historyKey: 'nda' | 'msa';
-  statusFieldKey: 'ndaStatus' | 'contractStatus';
-  progressKey: 'nda' | 'contract';
+  historyKey: 'nda' | 'msa' | 'otherAttachments';
+  statusFieldKey: 'ndaStatus' | 'contractStatus' | 'otherAttachmentsStatus';
+  progressKey: 'nda' | 'contract' | 'otherAttachments';
 };
 
-const NDA_STATUS_VALUES = [
+export const LEGAL_NOT_STARTED_STATUS = 'Not Started';
+export const LEGAL_UNDER_OUR_REVIEW_STATUS = 'Under our review';
+export const LEGAL_UNDER_CORRIDOR_REVIEW_STATUS = 'Under Corridor review';
+export const LEGAL_PENDING_CORRIDOR_SIGNATURE_STATUS = 'Pending Corridor signature';
+export const LEGAL_COMPLETED_STATUS = 'Completed';
+export const LEGAL_NO_NEED_STATUS = 'No Need';
+
+export const NDA_DISPLAY_STATUS_VALUES = [
+  LEGAL_NOT_STARTED_STATUS,
+  LEGAL_UNDER_OUR_REVIEW_STATUS,
+  LEGAL_UNDER_CORRIDOR_REVIEW_STATUS,
+  LEGAL_PENDING_CORRIDOR_SIGNATURE_STATUS,
+  LEGAL_COMPLETED_STATUS,
+  LEGAL_NO_NEED_STATUS,
+] as const;
+
+export const COMMON_LEGAL_DOCUMENT_DISPLAY_STATUS_VALUES = [
+  LEGAL_NOT_STARTED_STATUS,
+  LEGAL_UNDER_OUR_REVIEW_STATUS,
+  LEGAL_UNDER_CORRIDOR_REVIEW_STATUS,
+  LEGAL_PENDING_CORRIDOR_SIGNATURE_STATUS,
+  LEGAL_COMPLETED_STATUS,
+] as const;
+
+export const NDA_QUEUE_STATUS_VALUES = [
   'Under our review',
   'Under Corridor review',
-  'Pending our signature',
   'Pending Corridor signature',
   'Completed',
   'No Need',
 ] as const;
 
-const MSA_STATUS_VALUES = [
+export const COMMON_LEGAL_DOCUMENT_QUEUE_STATUS_VALUES = [
   'Under our review',
   'Under Corridor review',
-  'Pending our signature',
   'Pending Corridor signature',
   'Completed',
 ] as const;
 
+const NDA_STATUS_VALUES = NDA_QUEUE_STATUS_VALUES;
+const MSA_STATUS_VALUES = COMMON_LEGAL_DOCUMENT_QUEUE_STATUS_VALUES;
+
+const LEGAL_DOCUMENT_DISPLAY_NAME_MAP: Record<LegalDocType, string> = {
+  NDA: 'Non-Disclosure Agreement',
+  MSA: 'Master Services Agreement',
+  OTHER_ATTACHMENTS: 'Other Attachments',
+};
+
 const NDA_ALLOWED_BY_ROLE: Record<LegalActorRole, NdaStatusValue[]> = {
-  FIOP: ['Under our review', 'Pending our signature'],
+  FIOP: ['Under our review'],
   Legal: ['Under Corridor review', 'Pending Corridor signature', 'Completed', 'No Need'],
 };
 
 const MSA_ALLOWED_BY_ROLE: Record<LegalActorRole, MsaStatusValue[]> = {
-  FIOP: ['Under our review', 'Pending our signature'],
+  FIOP: ['Under our review'],
   Legal: ['Under Corridor review', 'Pending Corridor signature', 'Completed'],
 };
 
@@ -96,9 +157,9 @@ const NDA_STATUS_MIGRATION_MAP: Record<string, NdaStatusValue> = {
   reviewing: 'Under our review',
   'in review': 'Under our review',
   'under legal review': 'Under our review',
-  'pending our signature': 'Pending our signature',
-  'pending fi signature': 'Pending our signature',
-  'e-signature': 'Pending our signature',
+  'pending our signature': 'Under our review',
+  'pending fi signature': 'Under our review',
+  'e-signature': 'Under our review',
   'pending corridor signature': 'Pending Corridor signature',
   'pending channel signature': 'Pending Corridor signature',
   'under corridor review': 'Under Corridor review',
@@ -121,9 +182,9 @@ const MSA_STATUS_MIGRATION_MAP: Record<string, MsaStatusValue> = {
   reviewing: 'Under our review',
   'in review': 'Under our review',
   'under legal review': 'Under our review',
-  'pending our signature': 'Pending our signature',
-  'pending fi signature': 'Pending our signature',
-  'e-signature': 'Pending our signature',
+  'pending our signature': 'Under our review',
+  'pending fi signature': 'Under our review',
+  'e-signature': 'Under our review',
   'pending corridor signature': 'Pending Corridor signature',
   'pending channel signature': 'Pending Corridor signature',
   'under corridor review': 'Under Corridor review',
@@ -144,21 +205,26 @@ const WORKFLOW_STATUS_LABEL_MAP: Record<string, string> = {
   'under review': 'Under Review',
   reviewing: 'Under Review',
   'under our review': 'Under our review',
+  'under fi supervisor review': 'Under FI supervisor review',
+  'under legal review': 'Under legal review',
   'under corridor review': 'Under Corridor review',
   'under channel review': 'Under Corridor review',
   'corridor reviewing': 'Under Corridor review',
   corridor_reviewing: 'Under Corridor review',
   pending: 'Pending',
-  'pending our signature': 'Pending our signature',
+  'pending our signature': 'Under our review',
   'pending corridor signature': 'Pending Corridor signature',
-  'pending fi signature': 'Pending our signature',
+  'pending fi signature': 'Under our review',
   'pending channel signature': 'Pending Corridor signature',
-  'under legal review': 'Under Review',
   'in progress': 'In Progress',
   'in process': 'In Progress',
   ongoing: 'In Progress',
+  'pending fi supervisor': 'Under FI supervisor review',
+  'returned by fi supervisor': 'Under Corridor review',
+  'approved by fi supervisor': 'Under legal review',
+  'ready for legal': 'Under legal review',
   'not started': 'Not Started',
-  'e-signature': 'E-signature',
+  'e-signature': 'Under our review',
   none: 'None',
   'no need': 'No Need',
   no_need: 'No Need',
@@ -172,12 +238,16 @@ const WORKFLOW_STATUS_THEME_MAP: Record<string, WorkflowStatusTheme> = {
   'In Review': { bg: '#E0E7FF', text: '#4338CA' },
   'Under Review': { bg: '#E0E7FF', text: '#4338CA' },
   'Under our review': { bg: '#DBEAFE', text: '#1D4ED8' },
+  'Under FI supervisor review': { bg: '#FEF3C7', text: '#B45309' },
+  'Under legal review': { bg: '#DBEAFE', text: '#1D4ED8' },
   'Under Corridor review': { bg: '#F3E8FF', text: '#7E22CE' },
-  'E-signature': { bg: '#ECFDF5', text: '#047857' },
   Pending: { bg: '#FEF3C7', text: '#B45309' },
-  'Pending our signature': { bg: '#FEF3C7', text: '#B45309' },
   'Pending Corridor signature': { bg: '#FED7AA', text: '#C2410C' },
   'In Progress': { bg: '#FEF3C7', text: '#B45309' },
+  'Pending FI Supervisor': { bg: '#FEF3C7', text: '#B45309' },
+  'Returned by FI Supervisor': { bg: '#FFEDD5', text: '#C2410C' },
+  'Approved by FI Supervisor': { bg: '#D1FAE5', text: '#047857' },
+  'Ready for Legal': { bg: '#DBEAFE', text: '#1D4ED8' },
   'Not Started': { bg: '#F1F5F9', text: '#475569' },
   None: { bg: '#F8FAFC', text: '#64748B' },
   'No Need': { bg: '#F8FAFC', text: '#64748B' },
@@ -196,20 +266,61 @@ const resolveTimestamp = (value?: string | null) => {
 const resolveLegalFieldKeys = (docType: LegalDocType): LegalStatusFieldKeys => (
   docType === 'MSA'
     ? { historyKey: 'msa', statusFieldKey: 'contractStatus', progressKey: 'contract' }
-    : { historyKey: 'nda', statusFieldKey: 'ndaStatus', progressKey: 'nda' }
+    : docType === 'OTHER_ATTACHMENTS'
+      ? { historyKey: 'otherAttachments', statusFieldKey: 'otherAttachmentsStatus', progressKey: 'otherAttachments' }
+      : { historyKey: 'nda', statusFieldKey: 'ndaStatus', progressKey: 'nda' }
 );
 
 const buildLegalHistoryId = (docType: LegalDocType, index = Date.now()) => (
   `${docType.toLowerCase()}-${index}-${Math.random().toString(36).slice(2, 8)}`
 );
 
-const normalizeAttachment = (value: any, index = 0): LegalAttachment => ({
-  uid: normalizeText(value?.uid) || `attachment-${Date.now()}-${index}`,
-  name: normalizeText(value?.name) || 'Attachment',
-  status: normalizeText(value?.status) || 'done',
-  size: Number.isFinite(Number(value?.size)) ? Number(value.size) : 0,
-  type: normalizeText(value?.type),
-});
+const getLegalPendingHandoff = (
+  channel: any,
+  docType: LegalDocType,
+) => {
+  const { historyKey } = resolveLegalFieldKeys(docType);
+  return normalizePendingHandoff(channel?.legalPendingHandoffs?.[historyKey]);
+};
+
+const updateLegalHistoryEntryById = (
+  entries: LegalStatusHistoryEntry[],
+  entryId: string | undefined,
+  updater: (entry: LegalStatusHistoryEntry) => LegalStatusHistoryEntry,
+) => {
+  if (!entryId) return entries;
+  return entries.map((entry) => (entry.id === entryId ? updater(entry) : entry));
+};
+
+const getLatestVisibleLegalEvent = (
+  channel: any,
+  docType: LegalDocType,
+) => getLegalStatusHistory(channel, docType).find((entry) => entry.lifecycle?.state !== 'revoked') || null;
+
+const isTerminalLegalStatus = (status: LegalStatusValue) => (
+  status === 'Completed' || status === 'No Need'
+);
+
+const normalizeAttachmentUrl = (value: unknown) => {
+  const normalized = normalizeText((value as any)?.url || (value as any)?.downloadUrl);
+  return /^https?:/i.test(normalized) ? normalized : '';
+};
+
+const normalizeAttachment = (value: any, index = 0): LegalAttachment => {
+  const url = normalizeAttachmentUrl(value);
+
+  return {
+    uid: normalizeText(value?.uid) || `attachment-${Date.now()}-${index}`,
+    name: normalizeText(value?.name) || 'Attachment',
+    status: normalizeText(value?.status) || 'done',
+    size: Number.isFinite(Number(value?.size)) ? Number(value.size) : 0,
+    type: normalizeText(value?.type),
+    storageId: normalizeText(value?.storageId),
+    url,
+    downloadUrl: url,
+    urlSessionId: normalizeText(value?.urlSessionId),
+  };
+};
 
 const normalizeAttachmentList = (attachments: unknown) => (
   Array.isArray(attachments)
@@ -221,6 +332,43 @@ const normalizeStringArray = (value: unknown) => (
   Array.isArray(value)
     ? value.map((item) => normalizeText(item)).filter(Boolean)
     : []
+);
+
+const createEmptyLegalRequestPacket = (): LegalRequestPacket => ({
+  entities: [],
+  documentLink: '',
+  remarks: '',
+  attachments: [],
+  submittedAt: '',
+  submittedBy: '',
+});
+
+const normalizeLegalRequestPacket = (
+  value: unknown,
+  fallback: Partial<LegalRequestPacket> = {},
+): LegalRequestPacket => {
+  const candidate = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const entities = normalizeStringArray(candidate.entities);
+  const fallbackEntities = normalizeStringArray(fallback.entities);
+  const attachments = normalizeAttachmentList(candidate.attachments);
+  const fallbackAttachments = normalizeAttachmentList(fallback.attachments);
+
+  return {
+    entities: entities.length ? entities : fallbackEntities,
+    documentLink: normalizeText(candidate.documentLink) || normalizeText(fallback.documentLink),
+    remarks: normalizeText(candidate.remarks) || normalizeText(fallback.remarks),
+    attachments: attachments.length ? attachments : fallbackAttachments,
+    submittedAt: normalizeText(candidate.submittedAt) || normalizeText(fallback.submittedAt),
+    submittedBy: normalizeText(candidate.submittedBy) || normalizeText(fallback.submittedBy),
+  };
+};
+
+const hasLegalRequestPacketContent = (packet: LegalRequestPacket) => Boolean(
+  packet.entities.length
+  || packet.documentLink
+  || packet.remarks
+  || packet.attachments.length
+  || packet.submittedAt,
 );
 
 const buildAllowedStatusSet = (
@@ -280,7 +428,7 @@ const resolveHistoryActorRoleByStatus = (
     return 'Legal';
   }
 
-  if (status === 'Under our review' || status === 'Pending our signature') {
+  if (status === 'Under our review') {
     return 'FIOP';
   }
 
@@ -303,6 +451,102 @@ const dedupeLegalHistory = (entries: LegalStatusHistoryEntry[]) => {
     seen.add(key);
     return true;
   });
+};
+
+const buildRequestPacketFromHistoryEntry = (
+  entry: any,
+  actorName: string,
+  note: string,
+): LegalRequestPacket => (
+  normalizeLegalRequestPacket(
+    entry?.requestPacket,
+    {
+      entities: normalizeStringArray(entry?.entities),
+      documentLink: normalizeText(entry?.documentLink),
+      remarks: note,
+      attachments: normalizeAttachmentList(entry?.attachments),
+      submittedAt: normalizeText(entry?.time),
+      submittedBy: actorName,
+    },
+  )
+);
+
+const resolveLatestActiveFiopPacketFromEntries = (
+  entries: LegalStatusHistoryEntry[],
+) => {
+  const fiopEntries = entries.filter((entry) => entry.actorRole === 'FIOP');
+  const latestActiveEntry = fiopEntries.find((entry) => entry.lifecycle?.state !== 'revoked');
+  if (!latestActiveEntry) {
+    return {
+      packet: null as LegalRequestPacket | null,
+      sawFiopHistory: fiopEntries.length > 0,
+    };
+  }
+
+  const packet = normalizeLegalRequestPacket(
+    latestActiveEntry.requestPacket,
+    {
+      documentLink: latestActiveEntry.documentLink,
+      remarks: latestActiveEntry.note,
+      attachments: latestActiveEntry.attachments,
+      submittedAt: latestActiveEntry.time,
+      submittedBy: latestActiveEntry.actorName,
+    },
+  );
+
+  return {
+    packet: hasLegalRequestPacketContent(packet) ? packet : null,
+    sawFiopHistory: true,
+  };
+};
+
+const resolveLatestActiveFiopPacketFromRawHistory = (
+  channel: any,
+  docType: LegalDocType,
+) => {
+  const { historyKey } = resolveLegalFieldKeys(docType);
+  const rawEntries = Array.isArray(channel?.legalStatusHistory?.[historyKey])
+    ? channel.legalStatusHistory[historyKey]
+    : [];
+  let sawFiopHistory = false;
+
+  const candidates = rawEntries
+    .reduce<Array<{ packet: LegalRequestPacket; time: number; index: number }>>((packets, entry, index) => {
+      if (!entry || typeof entry !== 'object') return packets;
+      const toStatus = normalizeLegalDocumentStatusLabel(docType, (entry as any).toStatus || (entry as any).status);
+      if (toStatus === 'Not Started') return packets;
+
+      const fallbackRole = resolveHistoryActorRoleByStatus(toStatus);
+      const actorRole = normalizeLegalActorRole((entry as any).actorRole, fallbackRole);
+      if (actorRole !== 'FIOP') return packets;
+
+      sawFiopHistory = true;
+      const lifecycle = (entry as any).lifecycle ? normalizeTimelineLifecycle((entry as any).lifecycle, 'handoff') : undefined;
+      if (lifecycle?.state === 'revoked') return packets;
+
+      const actorName = resolveFiopActorName(
+        (entry as any).actorName,
+        (entry as any).user,
+        (entry as any).submittedBy,
+        channel?.fiopOwner,
+      );
+      const note = normalizeText((entry as any).note || (entry as any).notes || (entry as any).remark);
+      const packet = buildRequestPacketFromHistoryEntry(entry, actorName, note);
+      if (!hasLegalRequestPacketContent(packet)) return packets;
+
+      packets.push({
+        packet,
+        time: resolveTimestamp(packet.submittedAt || normalizeText((entry as any).time)),
+        index,
+      });
+      return packets;
+    }, [])
+    .sort((left, right) => (right.time - left.time) || (left.index - right.index));
+
+  return {
+    packet: candidates[0]?.packet || null,
+    sawFiopHistory,
+  };
 };
 
 export const normalizeWorkflowStatusLabel = (
@@ -374,6 +618,10 @@ export const getMsaStatusOptions = (actorRole: LegalActorRole | 'all' = 'all') =
     .map((value) => ({ label: value, value }));
 };
 
+export const getLegalDocumentDisplayName = (docType: LegalDocType) => (
+  LEGAL_DOCUMENT_DISPLAY_NAME_MAP[docType]
+);
+
 export const getLegalStatusOptions = (
   docType: LegalDocType,
   actorRole: LegalActorRole | 'all' = 'all',
@@ -384,7 +632,7 @@ export const getLegalQueueGroup = (docType: LegalDocType, value: unknown): Legal
 
   if (normalized === 'Completed') return 'completed';
   if (normalized === 'No Need') return docType === 'NDA' ? 'no_need' : 'completed';
-  if (normalized === 'Under our review' || normalized === 'Pending our signature') return 'legal_pending';
+  if (normalized === 'Under our review') return 'legal_pending';
   if (normalized === 'Under Corridor review' || normalized === 'Pending Corridor signature') return 'external_pending';
   return 'inactive';
 };
@@ -397,7 +645,6 @@ export const getLegalQueueSubStatusOptions = (
     return [
       { label: 'All', value: 'all' },
       { label: 'Under our review', value: 'Under our review' },
-      { label: 'Pending our signature', value: 'Pending our signature' },
     ];
   }
 
@@ -448,6 +695,10 @@ export const matchesLegalAuditLog = (
     return normalized.includes('nda') || normalized.includes('non-disclosure');
   }
 
+  if (docType === 'OTHER_ATTACHMENTS') {
+    return normalized.includes('attachment') || normalized.includes('attachments');
+  }
+
   return normalized.includes('msa')
     || normalized.includes('master services agreement')
     || normalized.includes('contract');
@@ -460,15 +711,24 @@ export const getLegalRequestPacket = (
   const { historyKey } = resolveLegalFieldKeys(docType);
   const savedRequest = channel?.legalRequestData?.[historyKey] || {};
   const savedHistory = channel?.submissionHistory?.[historyKey] || {};
+  const latestHistoryPacket = resolveLatestActiveFiopPacketFromRawHistory(channel, docType);
 
-  return {
-    entities: normalizeStringArray(savedRequest.entities),
-    documentLink: normalizeText(savedRequest.documentLink),
-    remarks: normalizeText(savedRequest.remarks || savedHistory.notes),
-    attachments: normalizeAttachmentList(savedRequest.attachments),
-    submittedAt: normalizeText(savedRequest.submittedAt || savedHistory.date),
-    submittedBy: resolveFiopActorName(savedRequest.submittedBy, channel?.fiopOwner, savedHistory.user),
-  };
+  if (latestHistoryPacket.packet) {
+    return latestHistoryPacket.packet;
+  }
+
+  if (latestHistoryPacket.sawFiopHistory) {
+    return createEmptyLegalRequestPacket();
+  }
+
+  return normalizeLegalRequestPacket(
+    savedRequest,
+    {
+      remarks: normalizeText(savedHistory.notes),
+      submittedAt: normalizeText(savedHistory.date),
+      submittedBy: resolveFiopActorName(savedRequest.submittedBy, channel?.fiopOwner, savedHistory.user),
+    },
+  );
 };
 
 const normalizeLegalHistoryEntry = (
@@ -485,26 +745,39 @@ const normalizeLegalHistoryEntry = (
 
   const fallbackRole = resolveHistoryActorRoleByStatus(toStatus);
   const actorRole = normalizeLegalActorRole(entry.actorRole, fallbackRole);
+  const note = normalizeText(entry.note || entry.notes || entry.remark);
+  const title = normalizeText(entry.title) || undefined;
+  if (isLegacyRevocationCopy(title, note)) return null;
+  const actorName = actorRole === 'Legal'
+    ? resolveLegalActorName(entry.actorName, entry.user)
+    : resolveFiopActorName(
+      entry.actorName,
+      entry.user,
+      entry.submittedBy,
+      requestPacket.submittedBy,
+      channel?.fiopOwner,
+    );
   const normalizedEntry: LegalStatusHistoryEntry = {
     id: normalizeText(entry.id) || buildLegalHistoryId(docType, index),
     time: normalizeText(entry.time),
     actorRole,
-    actorName: actorRole === 'Legal'
-      ? resolveLegalActorName(entry.actorName, entry.user)
-      : resolveFiopActorName(
-        entry.actorName,
-        entry.user,
-        entry.submittedBy,
-        requestPacket.submittedBy,
-        channel?.fiopOwner,
-      ),
+    actorName,
     fromStatus: normalizeText(entry.fromStatus)
       ? normalizeLegalDocumentStatusLabel(docType, entry.fromStatus)
       : null,
     toStatus,
-    note: normalizeText(entry.note || entry.notes || entry.remark),
+    displayStatus: normalizeText(entry.displayStatus)
+      ? normalizeLegalDocumentStatusLabel(docType, entry.displayStatus)
+      : undefined,
+    note,
     documentLink: normalizeText(entry.documentLink),
     attachments: normalizeAttachmentList(entry.attachments),
+    requestPacket: actorRole === 'FIOP'
+      ? buildRequestPacketFromHistoryEntry(entry, actorName, note)
+      : null,
+    title,
+    lifecycle: entry.lifecycle ? normalizeTimelineLifecycle(entry.lifecycle, 'normal') : undefined,
+    terminalDecision: normalizeTerminalDecisionMeta(entry.terminalDecision),
   };
 
   return normalizedEntry;
@@ -542,6 +815,7 @@ const buildMigratedLegalStatusHistory = (
       note: requestPacket.remarks || normalizeText(historySnapshot.notes),
       documentLink: requestPacket.documentLink,
       attachments: requestPacket.attachments,
+      requestPacket,
     });
   }
 
@@ -564,6 +838,7 @@ const buildMigratedLegalStatusHistory = (
         note: latestKnownNote,
         documentLink: requestPacket.documentLink,
         attachments: requestPacket.attachments,
+        requestPacket: actorRole === 'FIOP' ? requestPacket : null,
       });
     } else if (latestStatus && latestStatus !== currentStatus) {
       const actorRole = resolveHistoryActorRoleByStatus(currentStatus);
@@ -579,6 +854,7 @@ const buildMigratedLegalStatusHistory = (
         note: latestKnownNote,
         documentLink: requestPacket.documentLink,
         attachments: requestPacket.attachments,
+        requestPacket: actorRole === 'FIOP' ? requestPacket : null,
       });
     }
   }
@@ -612,8 +888,7 @@ export const getLatestLegalStatusEntry = (
   channel: any,
   docType: LegalDocType,
 ): LegalStatusHistoryEntry | null => {
-  const history = getLegalStatusHistory(channel, docType);
-  return history[0] || null;
+  return getLatestVisibleLegalEvent(channel, docType);
 };
 
 export const buildLegalSubmissionHistoryEntry = (
@@ -621,13 +896,34 @@ export const buildLegalSubmissionHistoryEntry = (
   docType: LegalDocType,
   historyEntries: LegalStatusHistoryEntry[] = getLegalStatusHistory(channel, docType),
 ) => {
-  const latestEntry = historyEntries[0];
+  const latestEntry = historyEntries.find((entry) => entry.lifecycle?.state !== 'revoked');
   const fallbackHistory = channel?.submissionHistory?.[resolveLegalFieldKeys(docType).historyKey] || {};
+  const hasRecordedHistory = historyEntries.length > 0;
+
+  if (latestEntry) {
+    return {
+      date: latestEntry.time || null,
+      user: latestEntry.actorName || null,
+      notes: latestEntry.note || null,
+      proposalId: fallbackHistory.proposalId || null,
+      proposalName: fallbackHistory.proposalName || null,
+    };
+  }
+
+  if (hasRecordedHistory) {
+    return {
+      date: null,
+      user: null,
+      notes: null,
+      proposalId: fallbackHistory.proposalId || null,
+      proposalName: fallbackHistory.proposalName || null,
+    };
+  }
 
   return {
-    date: latestEntry?.time || normalizeText(fallbackHistory.date) || null,
-    user: latestEntry?.actorName || normalizeText(fallbackHistory.user) || null,
-    notes: latestEntry?.note || normalizeText(fallbackHistory.notes) || null,
+    date: normalizeText(fallbackHistory.date) || null,
+    user: normalizeText(fallbackHistory.user) || null,
+    notes: normalizeText(fallbackHistory.notes) || null,
     proposalId: fallbackHistory.proposalId || null,
     proposalName: fallbackHistory.proposalName || null,
   };
@@ -639,7 +935,7 @@ const buildLegalAuditAction = (
   previousStatus: LegalStatusValue,
   nextStatus: LegalStatusValue,
 ) => {
-  const documentLabel = docType === 'NDA' ? 'NDA' : 'MSA';
+  const documentLabel = getLegalDocumentDisplayName(docType);
   if (previousStatus === 'Not Started') {
     return `${actorRole} started ${documentLabel} and set status to ${nextStatus}.`;
   }
@@ -677,6 +973,7 @@ export const applyLegalStatusUpdate = ({
   note,
   timestamp,
   packetUpdate,
+  historyAttachments,
 }: {
   channel: any;
   docType: LegalDocType;
@@ -686,12 +983,16 @@ export const applyLegalStatusUpdate = ({
   note?: string;
   timestamp: string;
   packetUpdate?: Partial<LegalRequestPacket>;
+  historyAttachments?: LegalAttachment[];
 }) => {
   const { historyKey, statusFieldKey, progressKey } = resolveLegalFieldKeys(docType);
   const previousStatus = normalizeLegalDocumentStatusLabel(
     docType,
     channel?.[statusFieldKey] || channel?.globalProgress?.[progressKey],
   );
+  const activePendingHandoff = isPendingHandoffActive(getLegalPendingHandoff(channel, docType))
+    ? getLegalPendingHandoff(channel, docType)
+    : null;
   const existingPacket = getLegalRequestPacket(channel, docType);
   const mergedPacket: LegalRequestPacket = {
     entities: normalizeStringArray(packetUpdate?.entities ?? existingPacket.entities),
@@ -705,9 +1006,32 @@ export const applyLegalStatusUpdate = ({
       ? normalizeText(actorName)
       : normalizeText(existingPacket.submittedBy),
   };
-  const statusNote = normalizeText(note) || mergedPacket.remarks || buildLegalAuditAction(docType, actorRole, previousStatus, nextStatus);
-  const existingHistory = getLegalStatusHistory(channel, docType);
-  const nextHistoryEntry: LegalStatusHistoryEntry = {
+  const historyEntryAttachments = actorRole === 'Legal'
+    ? normalizeAttachmentList(historyAttachments)
+    : mergedPacket.attachments;
+  const statusNote = normalizeText(note)
+    || (actorRole === 'FIOP' ? mergedPacket.remarks : '');
+  let existingHistory = getLegalStatusHistory(channel, docType);
+
+  if (activePendingHandoff && activePendingHandoff.receiverRole === 'Legal' && actorRole === 'Legal') {
+    existingHistory = updateLegalHistoryEntryById(
+      existingHistory,
+      activePendingHandoff.originEventId,
+      (entry) => ({
+        ...entry,
+        lifecycle: markLifecycleConsumed(entry.lifecycle),
+      }),
+    );
+  }
+
+  const isLegalReviewerAction = actorRole === 'Legal';
+  const isTerminalDecision = isLegalReviewerAction && isTerminalLegalStatus(normalizeLegalDocumentStatusLabel(docType, nextStatus));
+  const lifecycle = actorRole === 'FIOP'
+    ? createHandoffLifecycle()
+    : isTerminalDecision
+      ? createTerminalDecisionLifecycle()
+      : createNormalLifecycle();
+  let nextHistoryEntry: LegalStatusHistoryEntry = {
     id: buildLegalHistoryId(docType),
     time: timestamp,
     actorRole,
@@ -715,11 +1039,61 @@ export const applyLegalStatusUpdate = ({
     fromStatus: previousStatus === 'Not Started' ? null : previousStatus,
     toStatus: normalizeLegalDocumentStatusLabel(docType, nextStatus),
     note: statusNote,
-    documentLink: mergedPacket.documentLink,
-    attachments: mergedPacket.attachments,
+    documentLink: actorRole === 'FIOP' ? mergedPacket.documentLink : '',
+    attachments: historyEntryAttachments,
+    requestPacket: actorRole === 'FIOP' ? mergedPacket : null,
+    title: '',
+    lifecycle,
+    terminalDecision: null,
   };
+
+  if (actorRole === 'FIOP') {
+    nextHistoryEntry.title = `${getLegalDocumentDisplayName(docType)} package submitted`;
+  } else if (nextHistoryEntry.toStatus === 'Completed') {
+    nextHistoryEntry.title = `${getLegalDocumentDisplayName(docType)} archived`;
+  } else if (nextHistoryEntry.toStatus === 'No Need') {
+    nextHistoryEntry.title = `${getLegalDocumentDisplayName(docType)} marked as No Need`;
+  } else {
+    nextHistoryEntry.title = `Status updated to ${nextHistoryEntry.toStatus}`;
+  }
+
+  if (isLegalReviewerAction) {
+    const terminalDecision = recordTerminalDecision({
+      decisionEventId: nextHistoryEntry.id,
+      revocableByActor: normalizeText(actorName) || 'Legal Team',
+      previousStatus,
+      previousQueueState: getLegalQueueGroup(docType, previousStatus),
+    });
+    nextHistoryEntry = {
+      ...nextHistoryEntry,
+      terminalDecision,
+    };
+    if (isTerminalDecision) {
+      nextHistoryEntry = {
+        ...nextHistoryEntry,
+        lifecycle: createTerminalDecisionLifecycle(),
+      };
+    }
+  }
+
   const nextHistory = dedupeLegalHistory([nextHistoryEntry, ...existingHistory])
     .sort((left, right) => resolveTimestamp(right.time) - resolveTimestamp(left.time));
+  let nextPendingHandoff: PendingHandoff | null = null;
+
+  if (actorRole === 'FIOP') {
+    nextPendingHandoff = createPendingHandoff({
+      flowType: 'legal',
+      flowKey: docType,
+      senderRole: 'FIOP',
+      senderName: nextHistoryEntry.actorName,
+      receiverRole: 'Legal',
+      createdAt: timestamp,
+      sourceStatus: previousStatus,
+      targetStatus: nextHistoryEntry.toStatus,
+      originEventId: nextHistoryEntry.id,
+      payloadSnapshot: mergedPacket,
+    });
+  }
 
   return {
     ...channel,
@@ -735,6 +1109,10 @@ export const applyLegalStatusUpdate = ({
     legalStatusHistory: {
       ...(channel?.legalStatusHistory || {}),
       [historyKey]: nextHistory,
+    },
+    legalPendingHandoffs: {
+      ...(channel?.legalPendingHandoffs || {}),
+      [historyKey]: nextPendingHandoff,
     },
     submissionHistory: {
       ...(channel?.submissionHistory || {}),
@@ -754,5 +1132,146 @@ export const applyLegalStatusUpdate = ({
       },
       ...(Array.isArray(channel?.auditLogs) ? channel.auditLogs : []),
     ],
+  };
+};
+
+export const getLegalRevocableAction = (
+  channel: any,
+  docType: LegalDocType,
+  actorRole: WorkflowRole | null | undefined,
+  actorName: string,
+): RevocableAction | null => {
+  const latestVisibleEvent = getLatestVisibleLegalEvent(channel, docType);
+  if (!latestVisibleEvent) return null;
+
+  return getRevocableAction({
+    pendingHandoff: getLegalPendingHandoff(channel, docType),
+    terminalDecision: latestVisibleEvent.terminalDecision,
+    actorRole,
+    actorName,
+    eventId: latestVisibleEvent.id,
+    isLatestEvent: true,
+  });
+};
+
+export const revokeLegalPendingHandoff = (
+  channel: any,
+  docType: LegalDocType,
+  actorRole: WorkflowRole,
+  _actorName: string,
+  timestamp: string,
+  _reason = '',
+) => {
+  const { historyKey, statusFieldKey, progressKey } = resolveLegalFieldKeys(docType);
+  const activePendingHandoff = isPendingHandoffActive(getLegalPendingHandoff(channel, docType))
+    ? getLegalPendingHandoff(channel, docType)
+    : null;
+  if (!activePendingHandoff || activePendingHandoff.senderRole !== actorRole) {
+    return channel;
+  }
+
+  const restoredStatus = normalizeLegalDocumentStatusLabel(docType, activePendingHandoff.sourceStatus);
+  const existingHistory = getLegalStatusHistory(channel, docType);
+  const nextHistory = dedupeLegalHistory(
+    updateLegalHistoryEntryById(
+      existingHistory,
+      activePendingHandoff.originEventId,
+      (entry) => ({
+        ...entry,
+        displayStatus: restoredStatus,
+        lifecycle: markLifecycleRevoked(entry.lifecycle),
+      }),
+    ),
+  ).sort((left, right) => resolveTimestamp(right.time) - resolveTimestamp(left.time));
+  const restoredPacketResult = resolveLatestActiveFiopPacketFromEntries(nextHistory);
+  const restoredPacket = restoredPacketResult.packet || createEmptyLegalRequestPacket();
+
+  return {
+    ...channel,
+    [statusFieldKey]: restoredStatus,
+    globalProgress: {
+      ...(channel?.globalProgress || {}),
+      [progressKey]: restoredStatus,
+    },
+    legalStatusHistory: {
+      ...(channel?.legalStatusHistory || {}),
+      [historyKey]: nextHistory,
+    },
+    legalRequestData: {
+      ...(channel?.legalRequestData || {}),
+      [historyKey]: restoredPacket,
+    },
+    legalPendingHandoffs: {
+      ...(channel?.legalPendingHandoffs || {}),
+      [historyKey]: null,
+    },
+    submissionHistory: {
+      ...(channel?.submissionHistory || {}),
+      [historyKey]: {
+        date: restoredPacket.submittedAt || null,
+        user: restoredPacket.submittedBy || null,
+        notes: restoredPacket.remarks || null,
+      },
+    },
+    lastModifiedAt: timestamp,
+  };
+};
+
+export const revokeLegalTerminalDecision = (
+  channel: any,
+  docType: LegalDocType,
+  actorName: string,
+  timestamp: string,
+  reason = '',
+) => {
+  const { historyKey, statusFieldKey, progressKey } = resolveLegalFieldKeys(docType);
+  const existingHistory = getLegalStatusHistory(channel, docType);
+  const latestVisibleEvent = existingHistory.find((entry) => entry.lifecycle?.state !== 'revoked') || null;
+  const terminalDecision = latestVisibleEvent?.terminalDecision || null;
+  if (
+    !latestVisibleEvent
+    || !terminalDecision
+    || !terminalDecision.revocable
+    || terminalDecision.revocableByActor !== normalizeText(actorName)
+  ) {
+    return channel;
+  }
+
+  const restoredStatus = normalizeLegalDocumentStatusLabel(docType, terminalDecision.previousStatus);
+  const revokedDecision = revokeTerminalDecision(
+    terminalDecision,
+    actorName,
+    reason || `Restored ${restoredStatus} after legal status revoke.`,
+    timestamp,
+  );
+  const nextHistory = dedupeLegalHistory(
+    updateLegalHistoryEntryById(
+      existingHistory,
+      latestVisibleEvent.id,
+      (entry) => ({
+        ...entry,
+        displayStatus: restoredStatus,
+        lifecycle: markLifecycleRevoked(entry.lifecycle),
+        terminalDecision: revokedDecision,
+      }),
+    ),
+  ).sort((left, right) => resolveTimestamp(right.time) - resolveTimestamp(left.time));
+
+  return {
+    ...channel,
+    [statusFieldKey]: restoredStatus,
+    globalProgress: {
+      ...(channel?.globalProgress || {}),
+      [progressKey]: restoredStatus,
+    },
+    legalStatusHistory: {
+      ...(channel?.legalStatusHistory || {}),
+      [historyKey]: nextHistory,
+    },
+    legalPendingHandoffs: {
+      ...(channel?.legalPendingHandoffs || {}),
+      [historyKey]: null,
+    },
+    lastModifiedAt: timestamp,
   };
 };

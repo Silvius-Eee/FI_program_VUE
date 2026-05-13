@@ -1,18 +1,23 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue';
 import { message } from 'ant-design-vue';
+import { useAppStore } from '../stores/app';
 import {
   getChannelOnboardingWorkflow,
+  getOnboardingRevocableAction,
   getOnboardingStatusLabel,
   getOnboardingStatusTheme,
+  getOnboardingTimelineEvents,
   hasOnboardingSubmission,
 } from '../constants/onboarding';
+import { INPUT_LIMITS, showTextLimitWarning } from '../constants/inputLimits';
 
 const props = defineProps<{
   channel: any;
 }>();
 
-const emit = defineEmits(['submit', 'close']);
+const emit = defineEmits(['submit', 'close', 'revoke']);
+const store = useAppStore();
 
 const activeKey = ref('submission');
 const fileList = ref<any[]>([]);
@@ -34,6 +39,12 @@ const onboardingEntityOptions = [
 const workflow = computed(() => getChannelOnboardingWorkflow(props.channel, 'wooshpay'));
 const statusLabel = computed(() => getOnboardingStatusLabel('wooshpay', workflow.value.status));
 const statusTheme = computed(() => getOnboardingStatusTheme(workflow.value.status));
+const canOperateChannel = computed(() => store.canOperateFiWork(props.channel));
+const revocableAction = computed(() => (
+  canOperateChannel.value
+    ? getOnboardingRevocableAction('wooshpay', workflow.value, 'FIOP', store.currentUserName)
+    : null
+));
 
 const syncFormState = () => {
   const submission = workflow.value.submission;
@@ -72,23 +83,27 @@ const serializedAttachments = computed(() => fileList.value.map((file) => ({
 })));
 
 const historyEvents = computed(() => {
-  const events = workflow.value.statusHistory.map((entry) => ({
+  const events = getOnboardingTimelineEvents('wooshpay', workflow.value).map((entry) => ({
     id: entry.id,
-    type: 'status',
-    title: `Status updated to ${getOnboardingStatusLabel('wooshpay', entry.status)}`,
-    timestamp: entry.updatedAt,
-    actor: entry.updatedBy,
+    type: entry.eventType === 'submission' || entry.eventType === 'resubmission' ? 'submission' : 'status',
+    status: entry.displayStatus || entry.status,
+    timestamp: entry.time,
+    actor: entry.actorName,
     detail: entry.remark,
+    attachments: entry.attachments,
+    revoked: entry.lifecycle?.state === 'revoked',
   }));
 
-  if (hasOnboardingSubmission(workflow.value.submission)) {
+  if (!events.length && hasOnboardingSubmission(workflow.value.submission)) {
     events.push({
       id: 'submission',
       type: 'submission',
-      title: 'Package submitted to Compliance',
+      status: workflow.value.status,
       timestamp: workflow.value.submission.submittedAt,
       actor: workflow.value.submission.submittedBy,
       detail: workflow.value.submission.notes,
+      attachments: workflow.value.submission.attachments,
+      revoked: false,
     });
   }
 
@@ -102,6 +117,10 @@ const handleSubmit = () => {
     message.warning('Please select at least one contracting entity.');
     return;
   }
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Supporting link or portal', value: formState.documentLink, max: INPUT_LIMITS.url },
+    { label: 'What Compliance should review', value: formState.notes, max: INPUT_LIMITS.note },
+  ])) return;
 
   message.success('WooshPay onboarding package submitted successfully');
   emit('submit', {
@@ -214,7 +233,9 @@ const handleSubmit = () => {
               </template>
               <a-textarea
                 v-model:value="formState.documentLink"
+                :maxlength="INPUT_LIMITS.url"
                 :auto-size="{ minRows: 2, maxRows: 4 }"
+                show-count
                 placeholder="Paste the URL if the corridor provides a web link or onboarding portal"
                 class="kyc-link-textarea mt-2"
               />
@@ -231,7 +252,9 @@ const handleSubmit = () => {
               </template>
               <a-textarea
                 v-model:value="formState.notes"
+                :maxlength="INPUT_LIMITS.note"
                 :rows="4"
+                show-count
                 placeholder="List the materials, exceptions, or instructions Compliance should read before reviewing this track."
                 class="kyc-textarea mt-2"
               />
@@ -243,9 +266,26 @@ const handleSubmit = () => {
       <div v-else class="kyc-history-view">
         <div class="max-w-2xl mx-auto py-5">
           <a-timeline v-if="historyEvents.length">
-            <a-timeline-item v-for="event in historyEvents" :key="event.id" :color="event.type === 'submission' ? 'blue' : 'green'">
+            <a-timeline-item v-for="event in historyEvents" :key="event.id" :color="event.revoked ? 'orange' : event.type === 'submission' ? 'blue' : 'green'">
               <div class="flex flex-col gap-2">
-                <div class="text-[15px] font-black text-slate-800">{{ event.title }}</div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <span
+                    class="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-black"
+                    :style="{
+                      backgroundColor: getOnboardingStatusTheme(event.status).bg,
+                      color: getOnboardingStatusTheme(event.status).text,
+                      borderColor: getOnboardingStatusTheme(event.status).border,
+                    }"
+                  >
+                    {{ getOnboardingStatusLabel('wooshpay', event.status) }}
+                  </span>
+                  <span
+                    v-if="event.revoked"
+                    class="inline-flex items-center rounded-full border border-orange-200 bg-orange-100 px-2.5 py-0.5 text-[10px] font-black uppercase tracking-[0.12em] text-orange-700"
+                  >
+                    Revoked
+                  </span>
+                </div>
                 <div class="p-5 rounded-2xl border border-slate-100 bg-slate-50/50">
                   <div class="space-y-2 text-[13px] text-slate-600 font-medium">
                     <div class="flex items-center gap-2">
@@ -260,7 +300,30 @@ const handleSubmit = () => {
                       <span class="text-slate-400 shrink-0">Notes:</span>
                       <span class="text-slate-900 italic">"{{ event.detail }}"</span>
                     </div>
+                    <div v-if="event.attachments.length" class="flex items-start gap-2">
+                      <span class="text-slate-400 shrink-0">Attachments:</span>
+                      <span class="flex min-w-0 flex-wrap gap-2">
+                        <span
+                          v-for="attachment in event.attachments"
+                          :key="attachment.uid"
+                          class="inline-flex max-w-full items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-semibold text-slate-600"
+                        >
+                          <span class="truncate">{{ attachment.name }}</span>
+                        </span>
+                      </span>
+                    </div>
                   </div>
+                </div>
+                <div
+                  v-if="revocableAction && revocableAction.eventId === event.id"
+                  class="flex justify-end"
+                >
+                  <a-button
+                    class="h-[36px] rounded-xl border-orange-200 bg-orange-50 px-4 font-bold text-orange-700"
+                    @click="emit('revoke')"
+                  >
+                    {{ revocableAction.label }}
+                  </a-button>
                 </div>
               </div>
             </a-timeline-item>

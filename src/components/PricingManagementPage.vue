@@ -6,26 +6,39 @@ import {
   InfoCircleOutlined,
   InboxOutlined,
   ExportOutlined,
+  LinkOutlined,
+  DownloadOutlined,
+  EditOutlined,
 } from '@ant-design/icons-vue';
 import { message, Modal } from 'ant-design-vue';
 import PaymentMethodDrawer from './PaymentMethodDrawer.vue';
 import dayjs from 'dayjs';
 import {
+  applyPricingSubmission,
   FX_COST_DETAIL_REFERENCE_OPTIONS,
   FX_COST_MARKUP_REFERENCE_OPTIONS,
+  getPricingLegalStageStatus,
   getSettlementCycleDisplay,
   getSettlementThresholdDisplay,
   normalizePaymentMethodName,
+  PRICING_COMPLETED_STATUS,
+  PRICING_FI_SUPERVISOR_REVIEW_STATUS,
+  PRICING_LEGAL_REVIEW_STATUS,
   normalizePricingRuleCardCatalogItem,
   PRICING_RULE_CARD_SYSTEM_CATALOG,
   PRICING_RULE_CARD_SYSTEM_IDS,
 } from '../constants/initialData';
+import { openAttachmentUrl } from '../utils/attachment';
+import { applyFundSourceChannelUpdate } from '../utils/fund';
 import { getWorkflowStatusTheme, normalizeWorkflowStatusLabel } from '../utils/workflowStatus';
+import { INPUT_LIMITS, showTextLimitWarning } from '../constants/inputLimits';
 
 const store = useAppStore();
 const emit = defineEmits(['registerToolbar']);
 
 const channel = computed(() => store.selectedChannel || {});
+const canOperatePricing = computed(() => store.canOperateFiWork(channel.value));
+const pricingActorName = computed(() => store.currentUserName);
 const isReferralMode = (value?: string | null) => (value || '').trim().toLowerCase() === 'referral';
 const normalizeCooperationModeList = (value: unknown) => {
   if (Array.isArray(value)) {
@@ -41,6 +54,36 @@ const availableCooperationModes = computed(() => {
 const activeCooperationMode = ref('PayFac');
 const isReferralCooperationMode = computed(() => isReferralMode(activeCooperationMode.value));
 const timestampFormat = 'YYYY-MM-DD HH:mm:ss';
+const pricingAttachmentPreviewSessionId = (() => {
+  const scopedGlobal = globalThis as typeof globalThis & { __fiAttachmentPreviewSessionId?: string };
+  if (!scopedGlobal.__fiAttachmentPreviewSessionId) {
+    scopedGlobal.__fiAttachmentPreviewSessionId = globalThis.crypto?.randomUUID?.() || `attachment-session-${Date.now()}`;
+  }
+
+  return scopedGlobal.__fiAttachmentPreviewSessionId;
+})();
+const pricingAttachmentAccept = '.pdf,.doc,.docx,.xls,.xlsx,.xlsm,.csv,.jpg,.jpeg,.png,.gif,.webp,.bmp,.heic,.heif';
+const supportedPricingAttachmentExtensions = new Set([
+  'pdf',
+  'doc',
+  'docx',
+  'xls',
+  'xlsx',
+  'xlsm',
+  'csv',
+  'jpg',
+  'jpeg',
+  'png',
+  'gif',
+  'webp',
+  'bmp',
+  'heic',
+  'heif',
+]);
+const pendingPricingAttachmentHydration = ref<Promise<any[]> | null>(null);
+const pricingAttachmentHydrationVersion = ref(0);
+const pendingAddProposalAttachmentHydration = ref<Promise<any[]> | null>(null);
+const addProposalAttachmentHydrationVersion = ref(0);
 const fxMarkupReferenceSet = new Set<string>(FX_COST_MARKUP_REFERENCE_OPTIONS);
 const fxDetailReferenceSet = new Set<string>(FX_COST_DETAIL_REFERENCE_OPTIONS);
 const isFxMarkupReference = (value?: string | null) => fxMarkupReferenceSet.has((value || '').trim());
@@ -61,6 +104,25 @@ const currentView = ref<'list' | 'methodList' | 'detail'>('list');
 const activeProposalId = ref<string | null>(null);
 const selectedProposalId = ref<string | null>(null);
 const activePaymentMethod = ref<any>(null);
+const isPricingMetaEditing = ref(true);
+const pricingDraft = reactive<{
+  proposalId: string;
+  link: string;
+  remark: string;
+  merchant: string;
+  referralRule: string;
+  specifiedVerticals: string;
+  attachments: any[];
+}>({
+  proposalId: '',
+  link: '',
+  remark: '',
+  merchant: '',
+  referralRule: '',
+  specifiedVerticals: '',
+  attachments: [],
+});
+const pricingDraftSavedSnapshot = ref('');
 const rawPricingProposals = computed(() => channel.value.pricingProposals || []);
 const sortProposalsByTimestamp = (items: any[]) =>
   [...items].sort((a: any, b: any) => dayjs(b.updatedAt).valueOf() - dayjs(a.updatedAt).valueOf());
@@ -73,30 +135,81 @@ const pricingStatusLabel = computed(() => normalizeWorkflowStatusLabel(
   channel.value.pricingProposalStatus || channel.value.globalProgress?.pricing,
 ));
 const pricingStatusTheme = computed(() => getWorkflowStatusTheme(pricingStatusLabel.value));
+const isProposalScopedEntry = computed(() => store.pricingEntryMode === 'proposalScoped');
+const isApprovalReviewScopedEntry = computed(() => store.pricingEntryMode === 'approvalReviewScoped');
+const isLaunchApprovalReadonlyEntry = computed(() => store.detailEntryMode === 'launchApprovalReadonly');
+const isFundProposalScopedEntry = computed(() => (
+  store.pricingEntryMode === 'fundProposalScoped' || store.pricingEntryMode === 'fundMethodScoped'
+));
+const isFundSubmitScopedEntry = computed(() => isFundProposalScopedEntry.value && store.pricingReturnView === 'fundSubmit');
+const isFundReadonlyScopedEntry = computed(() => isFundProposalScopedEntry.value);
+const isPricingReadonlyScopedEntry = computed(() => (
+  isFundReadonlyScopedEntry.value
+  || isApprovalReviewScopedEntry.value
+  || isLaunchApprovalReadonlyEntry.value
+));
+const canMutatePricing = computed(() => canOperatePricing.value && !isPricingReadonlyScopedEntry.value);
+const pricingScopedRootLabel = computed(() => {
+  if (isFundProposalScopedEntry.value) return isFundSubmitScopedEntry.value ? 'Fund Submit' : 'Fund Detail';
+  if (isProposalScopedEntry.value || isApprovalReviewScopedEntry.value) return 'FI Supervisor Review';
+  return 'Corridor Detail';
+});
+const pricingScopedReadOnlyDescription = computed(() => {
+  if (isLaunchApprovalReadonlyEntry.value) {
+    return 'FI Supervisor is viewing this pricing schedule in read-only mode from launch approval details.';
+  }
+  if (isApprovalReviewScopedEntry.value) {
+    return 'FI Supervisor is reviewing this pricing schedule in read-only mode and can continue into payment method details below.';
+  }
+  if (isFundReadonlyScopedEntry.value) {
+    return 'Treasury is viewing this pricing schedule in read-only mode and can continue into payment method details below.';
+  }
+  return '';
+});
 const selectedProposal = computed(() =>
   proposals.value.find((proposal: any) => proposal.id === (selectedProposalId.value || activeProposalId.value))
 );
 const activeProposal = computed(() =>
   proposals.value.find((proposal: any) => proposal.id === activeProposalId.value)
 );
-const submissionTargetProposal = computed(() => (
-  selectedProposal.value
-  || activeProposal.value
-  || proposals.value[0]
-  || sortProposalsByTimestamp(rawPricingProposals.value)[0]
-  || null
+const pricingOriginBackLabel = computed(() => {
+  if (store.pricingReturnView === 'fundSubmit') return 'Return to Fund Submit';
+  if (store.pricingReturnView === 'fundDetail') return 'Return to Fund Detail';
+  if (store.pricingReturnView === 'pricingApprovalDetail') return 'Return to FI Supervisor Review';
+  if (store.pricingReturnView === 'legalDetail') return 'Return to Legal Detail';
+  if (store.pricingReturnView === 'dashboard') return 'Return to Dashboard';
+  return 'Return to Corridor Detail';
+});
+const canEditPricingMeta = computed(() => (
+  canMutatePricing.value && isPricingMetaEditing.value
 ));
+const isProposalMetaReadOnly = computed(() => !canEditPricingMeta.value);
 const getProposalById = (proposalId?: string | null) => (
   rawPricingProposals.value.find((proposal: any) => proposal.id === proposalId)
 );
+const getMethodById = (proposal: any, methodId?: string | null) => (
+  Array.isArray(proposal?.paymentMethods)
+    ? proposal.paymentMethods.find((method: any) => method?.id === methodId) || null
+    : null
+);
+const getSortedAllPricingProposals = () => sortProposalsByTimestamp(rawPricingProposals.value);
 
-const addFormState = reactive({
+const addFormState = reactive<{
+  type: string;
+  customType: string;
+  merchant: string;
+  referralRule: string;
+  link: string;
+  remark: string;
+  attachments: any[];
+}>({
   type: 'General',
   customType: '',
   merchant: '',
   referralRule: '',
   link: '',
   remark: '',
+  attachments: [],
 });
 const renameFormState = reactive({
   proposalId: '',
@@ -110,32 +223,68 @@ const renameMethodFormState = reactive({
 });
 
 // --- 工具栏注册 ---
+const leavePricing = () => {
+  store.closePricingProposal();
+};
+
+const returnToProposalList = () => {
+  if (isProposalScopedEntry.value || isApprovalReviewScopedEntry.value || isFundProposalScopedEntry.value) {
+    leavePricing();
+    return;
+  }
+  currentView.value = 'list';
+};
+
+const returnToMethodList = () => {
+  if (selectedProposalId.value) {
+    activePaymentMethod.value = null;
+    if (isFundProposalScopedEntry.value) {
+      store.selectedPricingMethodId = null;
+    }
+    currentView.value = 'methodList';
+    return;
+  }
+  returnToProposalList();
+};
+
+const handlePricingRootBreadcrumb = () => {
+  if (isFundProposalScopedEntry.value || isProposalScopedEntry.value || isApprovalReviewScopedEntry.value || store.pricingReturnView === 'legalDetail') {
+    leavePricing();
+    return;
+  }
+  store.setView('detail');
+};
+
+const handleMethodEditorClose = () => {
+  returnToMethodList();
+};
+
 const registerToolbar = () => {
   if (currentView.value === 'detail') {
     emit('registerToolbar', {
-      title: activePaymentMethod.value?.method ? formatMethodName(activePaymentMethod.value.method) : 'Configure Payment Method',
-      backLabel: 'Return to Pricing Schedule',
-      onBack: () => {
-        currentView.value = selectedProposalId.value ? 'methodList' : 'list';
-        registerToolbar();
-      },
+      title: activePaymentMethod.value?.method
+        ? formatMethodName(activePaymentMethod.value.method)
+        : isPricingReadonlyScopedEntry.value
+          ? 'View Payment Method'
+          : 'Configure Payment Method',
+      backLabel: isFundProposalScopedEntry.value ? 'Return to Pricing Schedule' : 'Return to Pricing Schedule',
+      onBack: returnToMethodList,
       centered: true
     });
   } else if (currentView.value === 'methodList') {
     emit('registerToolbar', {
       title: selectedProposal.value?.customProposalType || 'Pricing Schedule',
-      backLabel: 'Return to Pricing',
-      onBack: () => {
-        currentView.value = 'list';
-        registerToolbar();
-      },
+      backLabel: isFundProposalScopedEntry.value
+        ? (isFundSubmitScopedEntry.value ? 'Return to Fund Submit' : 'Return to Fund Detail')
+        : (isProposalScopedEntry.value || isApprovalReviewScopedEntry.value ? 'Return to FI Supervisor Review' : 'Return to Pricing'),
+      onBack: returnToProposalList,
       centered: true
     });
   } else {
     emit('registerToolbar', {
       title: `Pricing`,
-      backLabel: 'Return to Corridor Detail',
-      onBack: () => store.setView('detail'),
+      backLabel: pricingOriginBackLabel.value,
+      onBack: leavePricing,
       centered: true
     });
   }
@@ -178,13 +327,6 @@ watch(proposals, (nextProposals) => {
   }
 }, { immediate: true });
 
-watch(selectedProposal, (proposal: any) => {
-  if (!proposal) return;
-  if (proposal.type === 'Other' && proposal.specifiedVerticals === undefined) {
-    proposal.specifiedVerticals = proposal.customProposalType || '';
-  }
-}, { immediate: true });
-
 const openAddProposalModal = () => {
   resetAddFormState();
   isAddModalVisible.value = true;
@@ -196,6 +338,37 @@ const syncActiveModeWithProposal = (proposalId?: string | null) => {
     activeCooperationMode.value = proposal.mode;
   }
   return proposal;
+};
+
+const syncDeepLinkedProposal = (proposalId?: string | null) => {
+  if (!proposalId) return;
+  const proposal = syncActiveModeWithProposal(proposalId);
+  if (!proposal) return;
+
+  activeProposalId.value = proposal.id;
+  selectedProposalId.value = proposal.id;
+  activePaymentMethod.value = null;
+  currentView.value = 'methodList';
+};
+
+const syncFundScopedMethod = (proposalId?: string | null, methodId?: string | null) => {
+  if (!proposalId || !methodId) {
+    leavePricing();
+    return;
+  }
+
+  const proposal = syncActiveModeWithProposal(proposalId);
+  const method = getMethodById(proposal, methodId);
+  if (!proposal || !method) {
+    message.warning('This payment method is no longer available.');
+    leavePricing();
+    return;
+  }
+
+  activeProposalId.value = proposal.id;
+  selectedProposalId.value = proposal.id;
+  activePaymentMethod.value = JSON.parse(JSON.stringify(method));
+  currentView.value = 'detail';
 };
 
 const handleCooperationModeSwitch = (mode: string) => {
@@ -217,7 +390,7 @@ const handleCooperationModeGroupChange = (event: any) => {
 
 onMounted(() => {
   registerToolbar();
-  if (channel.value?.id && proposals.value.length === 0) {
+  if (!isProposalScopedEntry.value && !isApprovalReviewScopedEntry.value && !isFundProposalScopedEntry.value && channel.value?.id && proposals.value.length === 0) {
     openAddProposalModal();
   }
 });
@@ -229,10 +402,41 @@ watch(() => channel.value?.id, (nextId, previousId) => {
   activeProposalId.value = null;
   selectedProposalId.value = null;
   activePaymentMethod.value = null;
-  if (proposals.value.length === 0) {
+  if (!isProposalScopedEntry.value && !isApprovalReviewScopedEntry.value && !isFundProposalScopedEntry.value && proposals.value.length === 0) {
     openAddProposalModal();
   }
 });
+
+watch(
+  [() => store.view, () => store.selectedPricingProposalId, () => store.selectedPricingMethodId, proposals],
+  ([nextView, proposalId, methodId]) => {
+    if (nextView !== 'pricing') return;
+    if (isFundProposalScopedEntry.value) {
+      if (!proposalId || !getProposalById(proposalId)) {
+        leavePricing();
+        return;
+      }
+      if (methodId) {
+        syncFundScopedMethod(proposalId, methodId);
+        return;
+      }
+      syncDeepLinkedProposal(proposalId);
+      return;
+    }
+    if (!proposalId) return;
+    if (!getProposalById(proposalId)) return;
+    if (
+      proposalId === activeProposalId.value
+      && proposalId === selectedProposalId.value
+      && currentView.value !== 'list'
+    ) {
+      return;
+    }
+
+    syncDeepLinkedProposal(proposalId);
+  },
+  { immediate: true },
+);
 
 // --- 数据处理 ---
 const getCurrentTimestamp = () => dayjs().format(timestampFormat);
@@ -241,40 +445,13 @@ const formatProposalTimestamp = (timestamp?: string) => {
   const parsed = dayjs(timestamp);
   return parsed.isValid() ? parsed.format(timestampFormat) : timestamp;
 };
-const resolveTimestampValue = (timestamp?: string) => {
-  const parsed = dayjs(timestamp);
-  return parsed.isValid() ? parsed.valueOf() : 0;
+const ensurePricingEditAccess = () => {
+  if (canMutatePricing.value) return true;
+  message.warning(isPricingReadonlyScopedEntry.value
+    ? 'This pricing schedule is available in read-only mode from this workflow.'
+    : 'Only assigned FIOP/FIBD users or the FI Supervisor can edit pricing.');
+  return false;
 };
-const getApprovalHistoryEntryTitle = (type?: string) => {
-  if (type === 'approve') return 'Approved';
-  if (type === 'request_changes') return 'Request Changes';
-  return 'Submitted';
-};
-const getApprovalHistoryEntryStatus = (type?: string) => {
-  if (type === 'approve') return 'Approved';
-  if (type === 'request_changes') return 'Changes Requested';
-  return 'In Review';
-};
-const currentHistoryProposal = computed(() => submissionTargetProposal.value);
-const currentHistoryProposalStatus = computed(() => normalizeWorkflowStatusLabel(
-  currentHistoryProposal.value?.approvalStatus || 'Not Started',
-));
-const pricingHistoryEntries = computed(() => {
-  const proposal = currentHistoryProposal.value;
-  if (!proposal) return [];
-
-  const history = Array.isArray(proposal.approvalHistory) ? proposal.approvalHistory : [];
-  return [...history]
-    .sort((left: any, right: any) => resolveTimestampValue(right.time) - resolveTimestampValue(left.time))
-    .map((entry: any, index: number) => ({
-      key: `${proposal.id}-${entry.type}-${entry.time}-${index}`,
-      title: getApprovalHistoryEntryTitle(entry.type),
-      status: getApprovalHistoryEntryStatus(entry.type),
-      time: entry.time,
-      actor: entry.user || 'Current User',
-      note: entry.note || '',
-    }));
-});
 const persistProposals = (nextProposals: any[]) => {
   store.updateChannel({
     ...channel.value,
@@ -302,12 +479,15 @@ const buildReferralProposalName = (merchant?: string) => {
   return trimmedMerchant ? `${trimmedMerchant} Pricing Schedule` : 'Pricing Schedule';
 };
 const resetAddFormState = () => {
+  addProposalAttachmentHydrationVersion.value += 1;
+  pendingAddProposalAttachmentHydration.value = null;
   addFormState.type = 'General';
   addFormState.customType = '';
   addFormState.merchant = '';
   addFormState.referralRule = '';
   addFormState.link = '';
   addFormState.remark = '';
+  addFormState.attachments = [];
 };
 const closeAddProposalModal = () => {
   isAddModalVisible.value = false;
@@ -319,7 +499,264 @@ const getProposalReferralRulePreview = (value?: string | null) => {
   return normalized.length > 140 ? `${normalized.slice(0, 137)}...` : normalized;
 };
 const isReferralProposal = (proposal?: any) => isReferralMode(proposal?.mode);
-const isProposalInReview = (proposal?: any) => normalizeWorkflowStatusLabel(proposal?.approvalStatus) === 'In Review';
+const isProposalInReview = (proposal?: any) => {
+  const status = getPricingLegalStageStatus(proposal);
+  return [
+    PRICING_FI_SUPERVISOR_REVIEW_STATUS,
+    PRICING_LEGAL_REVIEW_STATUS,
+    PRICING_COMPLETED_STATUS,
+  ].includes(status);
+};
+const getAttachmentExtension = (name?: string | null) => {
+  const matched = String(name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+  return matched?.[1] || '';
+};
+const normalizeAttachmentUrl = (value: unknown) => {
+  const normalized = String((value as any)?.url || (value as any)?.downloadUrl || '').trim();
+  return /^(blob:|data:|https?:)/i.test(normalized) ? normalized : '';
+};
+const readBlobAsDataUrl = (blob: Blob) => new Promise<string>((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(String(reader.result || ''));
+  reader.onerror = () => reject(reader.error || new Error('Failed to read file'));
+  reader.readAsDataURL(blob);
+});
+const formatPricingAttachmentKind = (attachment: any) => {
+  const extension = getAttachmentExtension(attachment?.name);
+  if (extension) return extension.toUpperCase();
+
+  const mimeSegment = String(attachment?.type || '').split('/').pop();
+  return mimeSegment ? mimeSegment.toUpperCase() : 'FILE';
+};
+const normalizeProposalAttachmentList = (attachments: any[] = [], previousList: any[] = []) => {
+  const previousMap = new Map((Array.isArray(previousList) ? previousList : []).map((attachment: any) => [String(attachment?.uid || ''), attachment] as const));
+
+  return Array.isArray(attachments)
+    ? attachments.map((attachment: any, index: number) => {
+        const uid = String(attachment?.uid || `pricing-attachment-${index}`);
+        const previous = previousMap.get(uid);
+        let url = normalizeAttachmentUrl(attachment) || normalizeAttachmentUrl(previous) || '';
+        let urlSessionId = String(attachment?.urlSessionId || previous?.urlSessionId || '');
+
+        return {
+          uid,
+          name: String(attachment?.name || `Attachment ${index + 1}`),
+          status: String(attachment?.status || 'done'),
+          size: Number.isFinite(Number(attachment?.size)) ? Number(attachment.size) : 0,
+          type: String(attachment?.type || ''),
+          url,
+          urlSessionId,
+          downloadUrl: url,
+        };
+      })
+    : [];
+};
+const buildPersistentProposalAttachmentList = async (attachments: any[] = [], previousList: any[] = []) => {
+  const previousMap = new Map((Array.isArray(previousList) ? previousList : []).map((attachment: any) => [String(attachment?.uid || ''), attachment] as const));
+
+  return Promise.all((Array.isArray(attachments) ? attachments : []).map(async (attachment: any, index: number) => {
+    const uid = String(attachment?.uid || `pricing-attachment-${index}`);
+    const previous = previousMap.get(uid);
+    let url = normalizeAttachmentUrl(attachment) || normalizeAttachmentUrl(previous) || '';
+    let urlSessionId = String(attachment?.urlSessionId || previous?.urlSessionId || '');
+
+    if (!url && typeof window !== 'undefined' && attachment?.originFileObj instanceof Blob) {
+      url = await readBlobAsDataUrl(attachment.originFileObj);
+      urlSessionId = '';
+    }
+
+    return {
+      uid,
+      name: String(attachment?.name || `Attachment ${index + 1}`),
+      status: String(attachment?.status || 'done'),
+      size: Number.isFinite(Number(attachment?.size)) ? Number(attachment.size) : 0,
+      type: String(attachment?.type || ''),
+      url,
+      urlSessionId,
+      downloadUrl: url,
+    };
+  }));
+};
+const clonePricingAttachments = (attachments: any[] = []) => (
+  JSON.parse(JSON.stringify(normalizeProposalAttachmentList(attachments)))
+);
+const createPricingDraftFromProposal = (proposal?: any) => ({
+  proposalId: String(proposal?.id || ''),
+  link: String(proposal?.link || ''),
+  remark: String(proposal?.remark || ''),
+  merchant: String(proposal?.merchant || ''),
+  referralRule: String(proposal?.referralRule || ''),
+  specifiedVerticals: String(
+    proposal?.specifiedVerticals
+    ?? (proposal?.type === 'Other' ? proposal?.customProposalType || '' : '')
+  ),
+  attachments: clonePricingAttachments(proposal?.attachments),
+});
+const serializePricingDraft = (draft: typeof pricingDraft) => JSON.stringify({
+  proposalId: draft.proposalId,
+  link: draft.link,
+  remark: draft.remark,
+  merchant: draft.merchant,
+  referralRule: draft.referralRule,
+  specifiedVerticals: draft.specifiedVerticals,
+  attachments: clonePricingAttachments(draft.attachments),
+});
+const setPricingDraftFromProposal = (proposal?: any, options: { editing?: boolean } = {}) => {
+  const nextDraft = createPricingDraftFromProposal(proposal);
+  pricingDraft.proposalId = nextDraft.proposalId;
+  pricingDraft.link = nextDraft.link;
+  pricingDraft.remark = nextDraft.remark;
+  pricingDraft.merchant = nextDraft.merchant;
+  pricingDraft.referralRule = nextDraft.referralRule;
+  pricingDraft.specifiedVerticals = nextDraft.specifiedVerticals;
+  pricingDraft.attachments = nextDraft.attachments;
+  pricingDraftSavedSnapshot.value = serializePricingDraft(pricingDraft);
+  isPricingMetaEditing.value = Boolean(options.editing && canMutatePricing.value);
+};
+const clearPricingDraft = () => {
+  setPricingDraftFromProposal(null, { editing: false });
+};
+const getPricingDraftAttachmentFileList = () => normalizeProposalAttachmentList(pricingDraft.attachments);
+const isPricingDraftDirtyFor = (proposalId?: string | null) => (
+  Boolean(proposalId)
+  && pricingDraft.proposalId === proposalId
+  && serializePricingDraft(pricingDraft) !== pricingDraftSavedSnapshot.value
+);
+const handleEnterPricingEditMode = () => {
+  if (!ensurePricingEditAccess()) return;
+  isPricingMetaEditing.value = true;
+};
+const handleDiscardPricingDraft = () => {
+  const proposal = getProposalById(pricingDraft.proposalId) || selectedProposal.value;
+  setPricingDraftFromProposal(proposal, { editing: false });
+};
+watch(
+  () => selectedProposal.value?.id || '',
+  () => {
+    const proposal = selectedProposal.value;
+    if (!proposal) {
+      clearPricingDraft();
+      return;
+    }
+    setPricingDraftFromProposal(proposal, {
+      editing: canMutatePricing.value,
+    });
+  },
+  { immediate: true },
+);
+const formatAttachmentSize = (size: number) => {
+  if (!size) return 'Unknown size';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+};
+const isSupportedPricingAttachment = (file: any) => {
+  const extension = getAttachmentExtension(file?.name);
+  const mimeType = String(file?.type || '').toLowerCase();
+
+  return supportedPricingAttachmentExtensions.has(extension)
+    || mimeType.startsWith('image/')
+    || [
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'text/csv',
+    ].includes(mimeType);
+};
+const canOpenPricingAttachment = (attachment: any) => {
+  const url = normalizeAttachmentUrl(attachment);
+  if (!url) return false;
+  if (url.startsWith('blob:')) {
+    return String(attachment?.urlSessionId || '') === pricingAttachmentPreviewSessionId;
+  }
+
+  return true;
+};
+const openPricingAttachment = (attachment: any) => {
+  const url = normalizeAttachmentUrl(attachment);
+  if (!url || !canOpenPricingAttachment(attachment)) {
+    message.info('This local file can only be opened in the same browser session it was uploaded in. Re-upload it if needed.');
+    return;
+  }
+
+  openAttachmentUrl(url);
+};
+const openDocumentLink = (value?: string | null) => {
+  const normalized = String(value || '').trim();
+  if (!normalized) return;
+  window.open(normalized, '_blank', 'noopener,noreferrer');
+};
+const preventProposalAttachmentUpload = () => false;
+const getAddProposalAttachmentFileList = () => normalizeProposalAttachmentList(addFormState.attachments);
+const handleAddProposalAttachmentChange = async (info: any) => {
+  const nextFiles = Array.isArray(info?.fileList) ? info.fileList : [];
+  const invalidCount = nextFiles.filter((file: any) => !isSupportedPricingAttachment(file)).length;
+
+  if (invalidCount) {
+    message.warning('Only PDF, Word, Excel/CSV, and image files are supported in pricing attachments.');
+  }
+
+  const validFiles = nextFiles.filter((file: any) => isSupportedPricingAttachment(file));
+  const version = addProposalAttachmentHydrationVersion.value + 1;
+  addProposalAttachmentHydrationVersion.value = version;
+  const hydrationPromise = buildPersistentProposalAttachmentList(
+    validFiles,
+    getAddProposalAttachmentFileList(),
+  );
+  pendingAddProposalAttachmentHydration.value = hydrationPromise;
+
+  try {
+    const nextAttachments = await hydrationPromise;
+    if (addProposalAttachmentHydrationVersion.value !== version) return;
+
+    addFormState.attachments = nextAttachments;
+  } catch {
+    message.error('Failed to process pricing attachment. Please retry the upload.');
+  } finally {
+    if (pendingAddProposalAttachmentHydration.value === hydrationPromise) {
+      pendingAddProposalAttachmentHydration.value = null;
+    }
+  }
+};
+const handleProposalAttachmentChange = async (info: any) => {
+  if (!selectedProposal.value || !canEditPricingMeta.value) return;
+  const nextFiles = Array.isArray(info?.fileList) ? info.fileList : [];
+  const invalidCount = nextFiles.filter((file: any) => !isSupportedPricingAttachment(file)).length;
+
+  if (invalidCount) {
+    message.warning('Only PDF, Word, Excel/CSV, and image files are supported in pricing attachments.');
+  }
+
+  const validFiles = nextFiles.filter((file: any) => isSupportedPricingAttachment(file));
+  const version = pricingAttachmentHydrationVersion.value + 1;
+  pricingAttachmentHydrationVersion.value = version;
+  const hydrationPromise = buildPersistentProposalAttachmentList(
+    validFiles,
+    getPricingDraftAttachmentFileList(),
+  );
+  pendingPricingAttachmentHydration.value = hydrationPromise;
+
+  try {
+    const nextAttachments = await hydrationPromise;
+    if (!selectedProposal.value || pricingAttachmentHydrationVersion.value !== version) return;
+
+    pricingDraft.attachments = nextAttachments;
+  } catch {
+    message.error('Failed to process pricing attachment. Please retry the upload.');
+  } finally {
+    if (pendingPricingAttachmentHydration.value === hydrationPromise) {
+      pendingPricingAttachmentHydration.value = null;
+    }
+  }
+};
+const handleRemoveProposalAttachment = (uid: string) => {
+  if (!selectedProposal.value || !canEditPricingMeta.value) return;
+  const nextAttachments = getPricingDraftAttachmentFileList()
+    .filter((attachment: any) => attachment.uid !== uid);
+  pricingDraft.attachments = nextAttachments;
+};
 
 const formatFee = (rule: any) => {
   if (!rule) return 'Not set';
@@ -521,9 +958,11 @@ const createProposal = (options?: {
   referralRule?: string;
   link?: string;
   remark?: string;
+  attachments?: any[];
   openAfterCreate?: boolean;
   silent?: boolean;
 }) => {
+  if (!ensurePricingEditAccess()) return null;
   const mode = activeCooperationMode.value;
   const type = options?.type ?? addFormState.type;
   const customType = options?.customType ?? addFormState.customType;
@@ -531,6 +970,7 @@ const createProposal = (options?: {
   const referralRule = options?.referralRule ?? addFormState.referralRule;
   const link = options?.link ?? addFormState.link;
   const remark = options?.remark ?? addFormState.remark;
+  const attachments = clonePricingAttachments(options?.attachments ?? addFormState.attachments);
 
   if (isReferralMode(mode)) {
     if (!merchant.trim()) {
@@ -545,6 +985,13 @@ const createProposal = (options?: {
     message.warning('Please specify verticals');
     return null;
   }
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Merchant', value: merchant, max: INPUT_LIMITS.name },
+    { label: 'Referral Rule', value: referralRule, max: INPUT_LIMITS.note },
+    { label: 'Please Specify Verticals', value: customType, max: INPUT_LIMITS.name },
+    { label: 'Document Link', value: link, max: INPUT_LIMITS.url },
+    { label: 'Remark', value: remark, max: INPUT_LIMITS.note },
+  ])) return null;
 
   const newProposal = isReferralMode(mode)
     ? {
@@ -559,6 +1006,7 @@ const createProposal = (options?: {
         mode,
         approvalStatus: 'Not Started',
         updatedAt: getCurrentTimestamp(),
+        attachments,
         paymentMethods: [],
         approvalHistory: [],
       }
@@ -572,6 +1020,7 @@ const createProposal = (options?: {
         mode,
         approvalStatus: 'Not Started',
         updatedAt: getCurrentTimestamp(),
+        attachments,
         paymentMethods: [],
         approvalHistory: [],
       };
@@ -581,6 +1030,9 @@ const createProposal = (options?: {
 
   if (options?.openAfterCreate) {
     selectedProposalId.value = newProposal.id;
+    setPricingDraftFromProposal(newProposal, {
+      editing: canMutatePricing.value,
+    });
     currentView.value = 'methodList';
   }
 
@@ -591,16 +1043,39 @@ const createProposal = (options?: {
   return newProposal;
 };
 
-const handleAddProposal = () => {
-  const createdProposal = createProposal();
+const waitForAddProposalAttachmentHydration = async () => {
+  if (pendingAddProposalAttachmentHydration.value) {
+    try {
+      await pendingAddProposalAttachmentHydration.value;
+    } catch {
+      message.error('Pricing attachments are still processing. Please retry after upload completes.');
+      return false;
+    }
+  }
+
+  return true;
+};
+const handleAddProposal = async () => {
+  if (!(await waitForAddProposalAttachmentHydration())) return;
+
+  const createdProposal = createProposal({
+    attachments: getAddProposalAttachmentFileList(),
+    openAfterCreate: true,
+  });
   if (!createdProposal) return;
   closeAddProposalModal();
 };
 
 const handleOpenMethodList = (proposalId: string) => {
-  syncActiveModeWithProposal(proposalId);
+  const proposal = syncActiveModeWithProposal(proposalId);
   activeProposalId.value = proposalId;
   selectedProposalId.value = proposalId;
+  setPricingDraftFromProposal(proposal, {
+    editing: canMutatePricing.value,
+  });
+  if (isFundProposalScopedEntry.value) {
+    store.selectedPricingMethodId = null;
+  }
   currentView.value = 'methodList';
 };
 
@@ -609,17 +1084,26 @@ const handleEditMethod = (proposalId: string, method: any) => {
   activeProposalId.value = proposalId;
   selectedProposalId.value = currentView.value === 'methodList' ? proposalId : null;
   activePaymentMethod.value = JSON.parse(JSON.stringify(method));
+  if (isFundProposalScopedEntry.value) {
+    store.selectedPricingMethodId = method?.id || null;
+  }
   currentView.value = 'detail';
 };
 
 const customRow = (record: any, proposalId: string) => {
+  const isClickable = canMutatePricing.value || isPricingReadonlyScopedEntry.value;
   return {
-    onClick: () => handleEditMethod(proposalId, record),
-    class: 'cursor-pointer'
+    onClick: () => {
+      if (isClickable) {
+        handleEditMethod(proposalId, record);
+      }
+    },
+    class: isClickable ? 'cursor-pointer' : 'cursor-default'
   };
 };
 
 const handleAddMethod = (proposalId: string) => {
+  if (!ensurePricingEditAccess()) return;
   syncActiveModeWithProposal(proposalId);
   activeProposalId.value = proposalId;
   selectedProposalId.value = currentView.value === 'methodList' ? proposalId : null;
@@ -628,9 +1112,12 @@ const handleAddMethod = (proposalId: string) => {
 };
 
 const onSaveMethod = (data: any) => {
+  if (!ensurePricingEditAccess()) return;
   if (!activeProposalId.value) return;
+  const updatedAt = getCurrentTimestamp();
   let savedMethod = JSON.parse(JSON.stringify(data));
-  updateProposal(activeProposalId.value, (proposal: any) => {
+  const nextProposals = rawPricingProposals.value.map((proposal: any) => {
+    if (proposal.id !== activeProposalId.value) return proposal;
     const methods = [...proposal.paymentMethods];
     const idx = methods.findIndex((method: any) => method.id === data.id);
     if (idx !== -1) {
@@ -644,9 +1131,18 @@ const onSaveMethod = (data: any) => {
     return {
       ...proposal,
       paymentMethods: methods,
-      updatedAt: getCurrentTimestamp(),
+      updatedAt,
     };
   });
+  store.updateChannel(applyFundSourceChannelUpdate(
+    channel.value,
+    {
+      pricingProposals: sortProposalsByTimestamp(nextProposals),
+    },
+    pricingActorName.value,
+    updatedAt,
+    `Updated payment method snapshot mirrored to fund review for ${normalizePaymentMethodName(data.method) || 'payment method'}.`,
+  ));
   message.success('Configuration saved');
   if (isAddMethodModalVisible.value) {
     isAddMethodModalVisible.value = false;
@@ -657,6 +1153,7 @@ const onSaveMethod = (data: any) => {
 };
 
 const handleDuplicateMethod = (proposalId: string, methodId: string) => {
+  if (!ensurePricingEditAccess()) return;
   const proposal = rawPricingProposals.value.find((p: any) => p.id === proposalId);
   if (!proposal) return;
 
@@ -683,6 +1180,7 @@ const handleDuplicateMethod = (proposalId: string, methodId: string) => {
 };
 
 const openRenameMethodModal = (proposalId: string, method: any) => {
+  if (!ensurePricingEditAccess()) return;
   renameMethodFormState.proposalId = proposalId;
   renameMethodFormState.methodId = method.id;
   renameMethodFormState.name = formatMethodName(method.method || '');
@@ -691,11 +1189,15 @@ const openRenameMethodModal = (proposalId: string, method: any) => {
 };
 
 const handleRenameMethod = () => {
+  if (!ensurePricingEditAccess()) return;
   const trimmedName = normalizeMethodNameForForm(renameMethodFormState.name, renameMethodFormState.methodForm as 'card' | 'nonCard');
   if (!trimmedName) {
     message.warning('Payment method name is required');
     return;
   }
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Payment Method Name', value: renameMethodFormState.name, max: INPUT_LIMITS.name },
+  ])) return;
 
   updateProposal(renameMethodFormState.proposalId, (proposal: any) => ({
     ...proposal,
@@ -725,6 +1227,7 @@ const confirmDuplicateMethod = (proposalId: string, method: any) => {
 };
 
 const handleDuplicateProposal = (id: string) => {
+  if (!ensurePricingEditAccess()) return;
   const source = rawPricingProposals.value.find((p: any) => p.id === id);
   if (!source) return;
 
@@ -792,6 +1295,7 @@ const handleExportProposal = (proposalId: string) => {
 };
 
 const handleDeleteProposal = (id: string) => {
+  if (!ensurePricingEditAccess()) return;
   Modal.confirm({
     title: 'Delete Quotation?',
     content: 'All payment methods under this quotation will be removed.',
@@ -805,17 +1309,23 @@ const handleDeleteProposal = (id: string) => {
 };
 
 const openRenameProposalModal = (proposal: any) => {
+  if (!ensurePricingEditAccess()) return;
   renameFormState.proposalId = proposal.id;
   renameFormState.name = proposal.customProposalType || getPricingScheduleTypeLabel(proposal.type);
   isRenameModalVisible.value = true;
 };
 
 const handleRenameProposal = () => {
+  if (!ensurePricingEditAccess()) return;
   const trimmedName = renameFormState.name.trim();
   if (!trimmedName) {
     message.warning('Pricing schedule name is required');
     return;
   }
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Pricing Schedule Name', value: renameFormState.name, max: INPUT_LIMITS.name },
+  ])) return;
+
   updateProposal(renameFormState.proposalId, (proposal: any) => ({
     ...proposal,
     specifiedVerticals: proposal.specifiedVerticals || (proposal.type === 'Other' ? proposal.customProposalType || '' : ''),
@@ -829,100 +1339,185 @@ const handleRenameProposal = () => {
   message.success('Pricing schedule name updated');
 };
 
-const handleSavePricing = () => {
-  const proposalId = selectedProposalId.value || activeProposalId.value;
-  if (!proposalId) return;
-  const currentProposal = rawPricingProposals.value.find((proposal: any) => proposal.id === proposalId);
-  if (isReferralProposal(currentProposal)) {
-    if (!currentProposal?.merchant?.trim()) {
-      message.warning('Merchant is required');
-      return;
-    }
-    if (!currentProposal?.referralRule?.trim()) {
-      message.warning('Referral rule is required');
-      return;
+const waitForPricingAttachmentHydration = async (actionLabel: 'save' | 'submit') => {
+  if (pendingPricingAttachmentHydration.value) {
+    try {
+      await pendingPricingAttachmentHydration.value;
+    } catch {
+      message.error(`Pricing attachments are still processing. Please retry ${actionLabel} after upload completes.`);
+      return false;
     }
   }
-  updateProposal(proposalId, (proposal: any) => ({
-    ...proposal,
-    merchant: proposal.merchant?.trim?.() || proposal.merchant,
-    referralRule: proposal.referralRule?.trim?.() || proposal.referralRule,
-    updatedAt: getCurrentTimestamp(),
-  }));
-  message.success('Pricing configuration saved');
+
+  return true;
 };
-
-const handleSubmitPricingForReview = (proposalId?: string) => {
-  const proposal = proposalId ? syncActiveModeWithProposal(proposalId) : submissionTargetProposal.value;
-  if (!proposal) {
-    message.warning('Create or select a pricing schedule before submitting it for review.');
-    return;
+const validatePricingDraftForProposal = (proposal?: any) => {
+  if (isReferralProposal(proposal)) {
+    if (!pricingDraft.merchant.trim()) {
+      message.warning('Merchant is required');
+      return false;
+    }
+    if (!pricingDraft.referralRule.trim()) {
+      message.warning('Referral rule is required');
+      return false;
+    }
   }
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Merchant', value: pricingDraft.merchant, max: INPUT_LIMITS.name },
+    { label: 'Referral Rule', value: pricingDraft.referralRule, max: INPUT_LIMITS.note },
+    { label: 'Please Specify Verticals', value: pricingDraft.specifiedVerticals, max: INPUT_LIMITS.name },
+    { label: 'Document Link', value: pricingDraft.link, max: INPUT_LIMITS.url },
+    { label: 'Remark', value: pricingDraft.remark, max: INPUT_LIMITS.note },
+  ])) return false;
 
-  if (isProposalInReview(proposal)) {
-    message.warning('This pricing schedule is already in review.');
-    return;
-  }
+  return true;
+};
+const buildSavedProposalFromDraft = (proposal: any, updatedAt: string) => {
+  const link = pricingDraft.link.trim();
+  const remark = pricingDraft.remark.trim();
+  const merchant = pricingDraft.merchant.trim();
+  const referralRule = pricingDraft.referralRule.trim();
+  const specifiedVerticals = pricingDraft.specifiedVerticals.trim();
+  const attachments = normalizeProposalAttachmentList(pricingDraft.attachments);
+
+  return {
+    ...proposal,
+    link,
+    remark,
+    merchant,
+    referralRule,
+    specifiedVerticals: proposal?.type === 'Other' ? specifiedVerticals : proposal?.specifiedVerticals,
+    attachments,
+    legalRequestPacket: {
+      ...(proposal.legalRequestPacket || {}),
+      documentLink: link,
+      remarks: remark,
+      attachments,
+    },
+    updatedAt,
+  };
+};
+const savePricingDraft = async (options: { silent?: boolean; targetProposalId?: string } = {}) => {
+  if (!ensurePricingEditAccess()) return null;
+  if (!(await waitForPricingAttachmentHydration('save'))) return null;
+
+  const proposalId = options.targetProposalId || pricingDraft.proposalId || selectedProposalId.value || activeProposalId.value;
+  if (!proposalId || pricingDraft.proposalId !== proposalId) return null;
+
+  const currentProposal = rawPricingProposals.value.find((proposal: any) => proposal.id === proposalId);
+  if (!currentProposal || !validatePricingDraftForProposal(currentProposal)) return null;
 
   const updatedAt = getCurrentTimestamp();
+  let savedProposal: any = null;
+  const nextProposals = rawPricingProposals.value.map((proposal: any) => {
+    if (proposal.id !== proposalId) return proposal;
+    savedProposal = buildSavedProposalFromDraft(proposal, updatedAt);
+    return savedProposal;
+  });
+
+  persistProposals(nextProposals);
+  setPricingDraftFromProposal(savedProposal, { editing: false });
+  if (!options.silent) {
+    message.success('Pricing configuration saved');
+  }
+
+  return savedProposal;
+};
+const handleSavePricing = async () => {
+  await savePricingDraft();
+};
+
+const normalizeSubmitProposalId = (proposalId?: string | Event | null) => (
+  typeof proposalId === 'string' && proposalId.trim() ? proposalId : undefined
+);
+
+const resolveSubmitTargetProposal = (proposalId?: string | Event | null) => {
+  const normalizedProposalId = normalizeSubmitProposalId(proposalId);
+  if (normalizedProposalId) {
+    return syncActiveModeWithProposal(normalizedProposalId);
+  }
+
+  const prioritizedIds = currentView.value === 'list'
+    ? [activeProposalId.value, selectedProposalId.value]
+    : [selectedProposalId.value, activeProposalId.value];
+
+  for (const candidateId of prioritizedIds) {
+    const proposal = syncActiveModeWithProposal(candidateId);
+    if (proposal) return proposal;
+  }
+
+  return proposals.value[0] || getSortedAllPricingProposals()[0] || null;
+};
+
+const submitPricingForReview = (proposal: any) => {
+  const updatedAt = getCurrentTimestamp();
   const historyNote = proposal.remark || 'Pricing schedule submitted for review.';
-  const nextProposals = sortProposalsByTimestamp(
-    rawPricingProposals.value.map((currentProposal: any) => (
-      currentProposal.id === proposal.id
-        ? {
-            ...currentProposal,
-            approvalStatus: 'In Review',
-            updatedAt,
-            approvalHistory: [
-              ...(Array.isArray(currentProposal.approvalHistory) ? currentProposal.approvalHistory : []),
-              {
-                type: 'submit',
-                time: updatedAt,
-                user: 'Current User',
-                note: historyNote,
-              },
-            ],
-          }
-        : currentProposal
-    )),
-  );
 
   activeProposalId.value = proposal.id;
-  if (currentView.value === 'methodList') {
+  if (currentView.value === 'methodList' || currentView.value === 'detail') {
     selectedProposalId.value = proposal.id;
   }
 
-  store.updateChannel({
-    ...channel.value,
-    lastModifiedAt: updatedAt,
-    pricingProposals: nextProposals,
-    pricingProposalStatus: 'In Review',
-    globalProgress: {
-      ...(channel.value.globalProgress || {}),
-      pricing: 'In Review',
-    },
-    submissionHistory: {
-      ...(channel.value.submissionHistory || {}),
-      pricing: {
-        date: updatedAt,
-        user: 'Current User',
-        notes: historyNote,
-        proposalId: proposal.id,
-        proposalName: proposal.customProposalType || 'Pricing Schedule',
-      },
-    },
+  const updatedChannel = {
+    ...applyPricingSubmission(channel.value, proposal.id, pricingActorName.value, updatedAt, historyNote),
     auditLogs: [
       {
         time: updatedAt,
-        user: 'Current User',
+        user: pricingActorName.value,
         action: `Submitted pricing schedule "${proposal.customProposalType || 'Pricing Schedule'}" for review.`,
         color: 'blue',
       },
       ...(channel.value.auditLogs || []),
     ],
-  });
+  };
+  const updatedProposal = updatedChannel.pricingProposals?.find((item: any) => item.id === proposal.id);
+
+  store.updateChannel(updatedChannel);
 
   message.success('Pricing schedule submitted for review.');
+  if (getPricingLegalStageStatus(updatedProposal) === PRICING_LEGAL_REVIEW_STATUS) {
+    store.openLegalDetail('PRICING', 'pricing', { proposalId: proposal.id });
+  }
+};
+
+const handleSubmitPricingForReview = async (proposalId?: string | Event | null) => {
+  if (!ensurePricingEditAccess()) return;
+  if (!(await waitForPricingAttachmentHydration('submit'))) return;
+  if (!rawPricingProposals.value.length) {
+    message.warning('Create or select a pricing schedule before submitting it for review.');
+    return;
+  }
+
+  const proposal = resolveSubmitTargetProposal(proposalId);
+  if (!proposal) return;
+
+  if (isProposalInReview(proposal)) {
+    message.warning('This pricing schedule is not available for resubmission in its current status.');
+    return;
+  }
+
+  if (isPricingDraftDirtyFor(proposal.id)) {
+    if (!validatePricingDraftForProposal(proposal)) return;
+
+    Modal.confirm({
+      title: 'Save and submit this pricing schedule?',
+      content: `This will save your latest edits to "${proposal.customProposalType || 'Pricing Schedule'}" before sending it to the next reviewer.`,
+      okText: 'Save and Submit',
+      onOk: async () => {
+        const savedProposal = await savePricingDraft({ silent: true, targetProposalId: proposal.id });
+        if (!savedProposal) return Promise.reject();
+        submitPricingForReview(savedProposal);
+      },
+    });
+    return;
+  }
+
+  Modal.confirm({
+    title: 'Submit this pricing schedule for review?',
+    content: `This will send "${proposal.customProposalType || 'Pricing Schedule'}" to the next reviewer in the pricing workflow.`,
+    okText: 'Submit',
+    onOk: () => submitPricingForReview(proposal),
+  });
 };
 
 </script>
@@ -936,7 +1531,21 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
     }"
   >
     <div style="max-width: 1200px; margin: 0 auto">
-      <div v-if="currentView === 'list'">
+      <div
+        v-if="(isProposalScopedEntry || isApprovalReviewScopedEntry) && !selectedProposal"
+        class="rounded-[28px] border border-dashed border-slate-200 bg-white px-8 py-14 text-center shadow-[0_24px_50px_-32px_rgba(15,23,42,0.28)]"
+      >
+        <a-empty description="This pricing schedule is no longer available." />
+        <a-button
+          type="primary"
+          class="mt-6 h-[42px] rounded-lg px-6 font-bold bg-[#0284c7] border-none"
+          @click="leavePricing"
+        >
+          {{ pricingOriginBackLabel }}
+        </a-button>
+      </div>
+
+      <div v-if="currentView === 'list' && !isProposalScopedEntry && !isApprovalReviewScopedEntry">
         <!-- Header Card -->
         <a-card
         class="mb-5 onboarding-card"
@@ -987,13 +1596,7 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
           <h3 class="text-[18px] font-black text-slate-900 m-0">Pricing schedule list</h3>
           <span class="text-[13px] text-slate-400 font-medium">Last updated: {{ channel.lastModifiedAt || '2026-03-31 16:02:02' }}</span>
         </div>
-        <div class="flex items-center gap-3">
-          <a-button
-            @click="handleSubmitPricingForReview"
-            class="h-[40px] rounded-xl border-slate-200 px-5 font-black text-slate-700"
-          >
-            Submit for Review
-          </a-button>
+        <div v-if="canMutatePricing" class="flex items-center gap-3">
           <a-button 
             type="primary" 
             @click="openAddProposalModal"
@@ -1036,13 +1639,20 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
                     {{ getProposalReferralRulePreview(proposal.referralRule) }}
                   </p>
                 </div>
-                  <div class="flex items-center gap-2" @click.stop>
-                    <a-button size="small" @click="confirmDuplicateProposal(proposal)" class="rounded-lg font-bold text-slate-600 border border-slate-200 px-4 h-[28px] text-[11px] bg-white">Duplicate</a-button>
+                  <div v-if="canMutatePricing" class="flex items-center gap-2" @click.stop>
+                    <a-button
+                      size="small"
+                      :disabled="isProposalInReview(proposal)"
+                      @click="handleSubmitPricingForReview(proposal.id)"
+                      class="h-[30px] rounded-lg border border-slate-200 bg-white px-4 text-[11px] font-bold text-slate-600"
+                    >
+                      Submit
+                    </a-button>
                     <a-dropdown placement="bottomRight">
-                    <a-button size="small" class="rounded-lg font-bold text-sky-600 border border-sky-100 px-3 h-[28px] text-[11px] bg-sky-50/50">More actions</a-button>
+                    <a-button size="small" class="h-[30px] rounded-lg border border-slate-200 bg-white px-3 text-[11px] font-bold text-slate-600">More actions</a-button>
                     <template #overlay>
                       <a-menu>
-                        <a-menu-item key="submit" :disabled="isProposalInReview(proposal)" @click="handleSubmitPricingForReview(proposal.id)">Submit</a-menu-item>
+                        <a-menu-item key="duplicate" @click="confirmDuplicateProposal(proposal)">Duplicate</a-menu-item>
                         <a-menu-item key="rename" @click="openRenameProposalModal(proposal)">Rename schedule</a-menu-item>
                         <a-menu-item key="export" @click="handleExportProposal(proposal.id)">Export CSV</a-menu-item>
                         <a-menu-divider />
@@ -1102,7 +1712,7 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
               </a-table-column>
             </a-table>
 
-            <div class="p-4 bg-slate-50/20 border-t border-slate-50 flex justify-center">
+            <div v-if="canMutatePricing" class="p-4 bg-slate-50/20 border-t border-slate-50 flex justify-center">
               <a-button type="dashed" @click="handleAddMethod(proposal.id)" class="px-8 border-slate-300 text-slate-400 font-bold hover:text-sky-600 hover:border-sky-500 rounded-xl h-[40px] border-dashed">
                 <template #icon><plus-outlined /></template> Add Payment Method
               </a-button>
@@ -1128,8 +1738,16 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
             <div>
               <div class="mb-2">
                 <a-breadcrumb separator="/">
-                  <a-breadcrumb-item @click="store.setView('detail')" class="cursor-pointer text-slate-400 hover:text-sky-600 transition-colors text-[13px] font-medium">Corridor Detail</a-breadcrumb-item>
-                  <a-breadcrumb-item @click="currentView = 'list'" class="cursor-pointer text-slate-400 hover:text-sky-600 transition-colors text-[13px] font-medium">Pricing</a-breadcrumb-item>
+                  <a-breadcrumb-item @click="handlePricingRootBreadcrumb" class="cursor-pointer text-slate-400 hover:text-sky-600 transition-colors text-[13px] font-medium">
+                    {{ pricingScopedRootLabel }}
+                  </a-breadcrumb-item>
+                  <a-breadcrumb-item
+                    v-if="!isProposalScopedEntry && !isApprovalReviewScopedEntry && !isFundProposalScopedEntry"
+                    @click="returnToProposalList"
+                    class="cursor-pointer text-slate-400 hover:text-sky-600 transition-colors text-[13px] font-medium"
+                  >
+                    Pricing
+                  </a-breadcrumb-item>
                   <a-breadcrumb-item class="text-slate-600 font-medium text-[13px]">{{ selectedProposal.customProposalType || 'Pricing Schedule' }}</a-breadcrumb-item>
                 </a-breadcrumb>
               </div>
@@ -1142,54 +1760,194 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
                 </a-tag>
               </div>
               <p class="text-slate-400 text-[13px] m-0 max-w-2xl font-medium">
-                Review this pricing schedule, update the basic information here, and manage the payment methods below.
+                {{
+                  isPricingReadonlyScopedEntry
+                    ? pricingScopedReadOnlyDescription
+                    : 'Review this pricing schedule, update the basic information here, and manage the payment methods below.'
+                }}
               </p>
             </div>
             <div class="flex items-center gap-2">
               <a-button @click="handleExportProposal(selectedProposal.id)" class="h-[36px] px-4 rounded-xl font-bold text-slate-600 bg-white border border-slate-200 flex items-center gap-2">
-                <template #icon><export-outlined /></template>Export
+                <template #icon><export-outlined /></template>Export CSV
               </a-button>
-              <a-button @click="handleSubmitPricingForReview" class="h-[36px] rounded-xl border-slate-200 px-4 font-black text-slate-700">
+              <a-button v-if="canMutatePricing" @click="handleSubmitPricingForReview()" class="h-[36px] rounded-xl border-slate-200 px-4 font-black text-slate-700">
                 Submit for Review
               </a-button>
-              <a-button @click="currentView = 'list'" class="h-[36px] px-4 rounded-xl font-bold text-slate-400 bg-slate-50 border-none">Discard</a-button>
-              <a-button type="primary" @click="handleSavePricing" class="h-[36px] px-6 rounded-xl font-black bg-[#0284c7] border-none shadow-md">Save</a-button>
+              <template v-if="canMutatePricing">
+                <template v-if="isPricingMetaEditing">
+                  <a-button @click="handleDiscardPricingDraft" class="h-[36px] px-4 rounded-xl font-bold text-slate-400 bg-slate-50 border-none">Discard</a-button>
+                  <a-button type="primary" @click="handleSavePricing" class="h-[36px] px-6 rounded-xl font-black bg-[#0284c7] border-none shadow-md">Save</a-button>
+                </template>
+                <a-button v-else type="text" @click="handleEnterPricingEditMode" class="h-[36px] rounded-xl px-4 font-bold text-sky-600 hover:bg-sky-50">
+                  <template #icon><edit-outlined /></template>
+                  Edit
+                </a-button>
+              </template>
             </div>
           </div>
 
           <a-form layout="vertical" class="pricing-meta-form">
             <a-row v-if="isReferralProposal(selectedProposal)" :gutter="16">
-              <a-col :span="8">
+              <a-col :span="12">
                 <a-form-item label="Merchant">
                   <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Merchant</span></template>
                   <a-input
-                    v-model:value="selectedProposal.merchant"
+                    v-model:value="pricingDraft.merchant"
+                    :maxlength="INPUT_LIMITS.name"
                     placeholder="Enter merchant name"
                     class="rounded-xl h-[44px] border-slate-200"
+                    :readonly="isProposalMetaReadOnly"
                   />
                 </a-form-item>
               </a-col>
-              <a-col :span="8">
+              <a-col :span="12">
                 <a-form-item label="Document Link">
                   <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Document Link</span></template>
-                  <a-input v-model:value="selectedProposal.link" placeholder="Paste document link" class="rounded-xl h-[44px] border-slate-200" />
+                  <div class="flex items-center gap-2">
+                    <a-input v-model:value="pricingDraft.link" :maxlength="INPUT_LIMITS.url" :readonly="isProposalMetaReadOnly" placeholder="Paste document link" class="rounded-xl h-[44px] border-slate-200" />
+                    <a-button
+                      v-if="pricingDraft.link"
+                      class="h-[44px] rounded-xl border-slate-200 px-4 font-bold"
+                      @click="openDocumentLink(pricingDraft.link)"
+                    >
+                      <template #icon><link-outlined /></template>
+                      Open
+                    </a-button>
+                  </div>
                 </a-form-item>
               </a-col>
-              <a-col :span="8">
+              <a-col :span="24">
                 <a-form-item label="Remark">
                   <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Remark</span></template>
-                  <a-input v-model:value="selectedProposal.remark" placeholder="Internal notes" class="rounded-xl h-[44px] border-slate-200" />
+                  <a-textarea
+                    v-model:value="pricingDraft.remark"
+                    :maxlength="INPUT_LIMITS.note"
+                    :readonly="isProposalMetaReadOnly"
+                    :auto-size="{ minRows: 4, maxRows: 8 }"
+                    show-count
+                    placeholder="Internal notes"
+                    class="rounded-xl border-slate-200"
+                  />
                 </a-form-item>
               </a-col>
               <a-col :span="24">
                 <a-form-item label="Referral Rule">
                   <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Referral Rule</span></template>
                   <a-textarea
-                    v-model:value="selectedProposal.referralRule"
+                    v-model:value="pricingDraft.referralRule"
+                    :maxlength="INPUT_LIMITS.note"
                     :rows="4"
+                    show-count
                     placeholder="Input referral rule"
                     class="rounded-xl border-slate-200"
+                    :readonly="isProposalMetaReadOnly"
                   />
+                </a-form-item>
+              </a-col>
+              <a-col :span="24">
+                <a-form-item label="Attachments">
+                  <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Attachments</span></template>
+                  <template v-if="isPricingReadonlyScopedEntry">
+                    <div class="rounded-2xl border border-slate-200 bg-slate-50/40 p-4">
+                      <div v-if="getPricingDraftAttachmentFileList().length" class="space-y-3">
+                        <div
+                          v-for="file in getPricingDraftAttachmentFileList()"
+                          :key="file.uid"
+                          class="flex items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white px-4 py-3"
+                        >
+                          <button
+                            type="button"
+                            class="min-w-0 flex-1 border-0 bg-transparent p-0 text-left"
+                            @click="openPricingAttachment(file)"
+                          >
+                            <div class="truncate text-[13px] font-bold text-slate-800">{{ file.name }}</div>
+                            <div class="mt-1 text-[12px] font-medium text-slate-400">
+                              {{ formatPricingAttachmentKind(file) }} / {{ formatAttachmentSize(file.size) }}
+                            </div>
+                            <div class="mt-1 text-[12px] font-semibold" :class="canOpenPricingAttachment(file) ? 'text-sky-600' : 'text-slate-400'">
+                              {{ canOpenPricingAttachment(file) ? 'Click to open' : 'Re-upload in this session to open' }}
+                            </div>
+                          </button>
+                          <a-button
+                            v-if="canOpenPricingAttachment(file)"
+                            type="default"
+                            size="small"
+                            class="inline-flex items-center gap-1 rounded-lg border-slate-200 px-3 py-2 text-[12px] font-bold text-slate-700 hover:border-sky-300 hover:text-sky-600"
+                            @click="openPricingAttachment(file)"
+                          >
+                            <template #icon><download-outlined /></template>
+                            Open
+                          </a-button>
+                          <span v-else class="text-[12px] font-semibold text-slate-400">Unavailable in this session</span>
+                        </div>
+                      </div>
+                      <div v-else class="text-[13px] font-medium text-slate-400">
+                        No pricing attachments uploaded for this schedule.
+                      </div>
+                    </div>
+                  </template>
+                  <a-upload-dragger
+                    v-else
+                    :file-list="getPricingDraftAttachmentFileList()"
+                    :before-upload="preventProposalAttachmentUpload"
+                    :accept="pricingAttachmentAccept"
+                    :show-upload-list="false"
+                    :disabled="!canEditPricingMeta"
+                    multiple
+                    class="bg-slate-50/50 border-dashed border-slate-200 rounded-2xl py-5"
+                    @change="handleProposalAttachmentChange"
+                  >
+                    <div class="ant-upload-drag-icon">
+                      <div class="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl border border-slate-100 bg-white shadow-sm">
+                        <inbox-outlined class="text-xl text-sky-600" />
+                      </div>
+                    </div>
+                    <p class="mb-1 text-[14px] font-black text-slate-800">Upload pricing attachments here</p>
+                    <p class="text-[12px] font-medium text-slate-400">Support PDF, Word, Excel/CSV, and image files. Attachments added here will be available in Legal after submit.</p>
+                  </a-upload-dragger>
+                  <div v-if="!isPricingReadonlyScopedEntry && getPricingDraftAttachmentFileList().length" class="mt-3 space-y-3">
+                    <div
+                      v-for="file in getPricingDraftAttachmentFileList()"
+                      :key="file.uid"
+                      class="flex items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white px-4 py-3"
+                    >
+                      <button
+                        type="button"
+                        class="min-w-0 flex-1 border-0 bg-transparent p-0 text-left"
+                        @click="openPricingAttachment(file)"
+                      >
+                        <div class="truncate text-[13px] font-bold text-slate-800">{{ file.name }}</div>
+                        <div class="mt-1 text-[12px] font-medium text-slate-400">
+                          {{ formatPricingAttachmentKind(file) }} / {{ formatAttachmentSize(file.size) }}
+                        </div>
+                        <div class="mt-1 text-[12px] font-semibold" :class="canOpenPricingAttachment(file) ? 'text-sky-600' : 'text-slate-400'">
+                          {{ canOpenPricingAttachment(file) ? 'Click to open' : 'Re-upload in this session to open' }}
+                        </div>
+                      </button>
+                      <a-space size="small">
+                        <a-button
+                          v-if="canOpenPricingAttachment(file)"
+                          type="default"
+                          size="small"
+                          class="rounded-lg border-slate-200 px-3 text-[12px] font-bold text-slate-700 hover:border-sky-300 hover:text-sky-600"
+                          @click="openPricingAttachment(file)"
+                        >
+                          <template #icon><download-outlined /></template>
+                          Open
+                        </a-button>
+                        <a-button
+                          v-if="canEditPricingMeta"
+                          type="text"
+                          size="small"
+                          class="text-slate-400 hover:text-rose-500 hover:bg-rose-50"
+                          @click="handleRemoveProposalAttachment(file.uid)"
+                        >
+                          Remove
+                        </a-button>
+                      </a-space>
+                    </div>
+                  </div>
                 </a-form-item>
               </a-col>
             </a-row>
@@ -1207,23 +1965,148 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
               <a-col :span="selectedProposal?.type === 'Other' ? 6 : 8">
                 <a-form-item label="Document Link">
                   <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Document Link</span></template>
-                  <a-input v-model:value="selectedProposal.link" placeholder="Paste document link" class="rounded-xl h-[44px] border-slate-200" />
-                </a-form-item>
-              </a-col>
-              <a-col :span="selectedProposal?.type === 'Other' ? 6 : 8">
-                <a-form-item label="Remark">
-                  <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Remark</span></template>
-                  <a-input v-model:value="selectedProposal.remark" placeholder="Internal notes" class="rounded-xl h-[44px] border-slate-200" />
+                  <div class="flex items-center gap-2">
+                    <a-input v-model:value="pricingDraft.link" :maxlength="INPUT_LIMITS.url" :readonly="isProposalMetaReadOnly" placeholder="Paste document link" class="rounded-xl h-[44px] border-slate-200" />
+                    <a-button
+                      v-if="pricingDraft.link"
+                      class="h-[44px] rounded-xl border-slate-200 px-4 font-bold"
+                      @click="openDocumentLink(pricingDraft.link)"
+                    >
+                      <template #icon><link-outlined /></template>
+                      Open
+                    </a-button>
+                  </div>
                 </a-form-item>
               </a-col>
               <a-col v-if="selectedProposal?.type === 'Other'" :span="6">
                 <a-form-item label="Please Specify Verticals">
                   <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Please Specify Verticals</span></template>
                   <a-input
-                    v-model:value="selectedProposal.specifiedVerticals"
+                    v-model:value="pricingDraft.specifiedVerticals"
+                    :maxlength="INPUT_LIMITS.name"
                     placeholder="Enter specific verticals"
                     class="rounded-xl h-[44px] border-slate-200"
+                    :readonly="isProposalMetaReadOnly"
                   />
+                </a-form-item>
+              </a-col>
+              <a-col :span="24">
+                <a-form-item label="Remark">
+                  <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Remark</span></template>
+                  <a-textarea
+                    v-model:value="pricingDraft.remark"
+                    :maxlength="INPUT_LIMITS.note"
+                    :readonly="isProposalMetaReadOnly"
+                    :auto-size="{ minRows: 4, maxRows: 8 }"
+                    show-count
+                    placeholder="Internal notes"
+                    class="rounded-xl border-slate-200"
+                  />
+                </a-form-item>
+              </a-col>
+              <a-col :span="24">
+                <a-form-item label="Attachments">
+                  <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Attachments</span></template>
+                  <template v-if="isPricingReadonlyScopedEntry">
+                    <div class="rounded-2xl border border-slate-200 bg-slate-50/40 p-4">
+                      <div v-if="getPricingDraftAttachmentFileList().length" class="space-y-3">
+                        <div
+                          v-for="file in getPricingDraftAttachmentFileList()"
+                          :key="file.uid"
+                          class="flex items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white px-4 py-3"
+                        >
+                          <button
+                            type="button"
+                            class="min-w-0 flex-1 border-0 bg-transparent p-0 text-left"
+                            @click="openPricingAttachment(file)"
+                          >
+                            <div class="truncate text-[13px] font-bold text-slate-800">{{ file.name }}</div>
+                            <div class="mt-1 text-[12px] font-medium text-slate-400">
+                              {{ formatPricingAttachmentKind(file) }} / {{ formatAttachmentSize(file.size) }}
+                            </div>
+                            <div class="mt-1 text-[12px] font-semibold" :class="canOpenPricingAttachment(file) ? 'text-sky-600' : 'text-slate-400'">
+                              {{ canOpenPricingAttachment(file) ? 'Click to open' : 'Re-upload in this session to open' }}
+                            </div>
+                          </button>
+                          <a-button
+                            v-if="canOpenPricingAttachment(file)"
+                            type="default"
+                            size="small"
+                            class="inline-flex items-center gap-1 rounded-lg border-slate-200 px-3 py-2 text-[12px] font-bold text-slate-700 hover:border-sky-300 hover:text-sky-600"
+                            @click="openPricingAttachment(file)"
+                          >
+                            <template #icon><download-outlined /></template>
+                            Open
+                          </a-button>
+                          <span v-else class="text-[12px] font-semibold text-slate-400">Unavailable in this session</span>
+                        </div>
+                      </div>
+                      <div v-else class="text-[13px] font-medium text-slate-400">
+                        No pricing attachments uploaded for this schedule.
+                      </div>
+                    </div>
+                  </template>
+                  <a-upload-dragger
+                    v-else
+                    :file-list="getPricingDraftAttachmentFileList()"
+                    :before-upload="preventProposalAttachmentUpload"
+                    :accept="pricingAttachmentAccept"
+                    :show-upload-list="false"
+                    :disabled="!canEditPricingMeta"
+                    multiple
+                    class="bg-slate-50/50 border-dashed border-slate-200 rounded-2xl py-5"
+                    @change="handleProposalAttachmentChange"
+                  >
+                    <div class="ant-upload-drag-icon">
+                      <div class="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl border border-slate-100 bg-white shadow-sm">
+                        <inbox-outlined class="text-xl text-sky-600" />
+                      </div>
+                    </div>
+                    <p class="mb-1 text-[14px] font-black text-slate-800">Upload pricing attachments here</p>
+                    <p class="text-[12px] font-medium text-slate-400">Support PDF, Word, Excel/CSV, and image files. Attachments added here will be available in Legal after submit.</p>
+                  </a-upload-dragger>
+                  <div v-if="!isPricingReadonlyScopedEntry && getPricingDraftAttachmentFileList().length" class="mt-3 space-y-3">
+                    <div
+                      v-for="file in getPricingDraftAttachmentFileList()"
+                      :key="file.uid"
+                      class="flex items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white px-4 py-3"
+                    >
+                      <button
+                        type="button"
+                        class="min-w-0 flex-1 border-0 bg-transparent p-0 text-left"
+                        @click="openPricingAttachment(file)"
+                      >
+                        <div class="truncate text-[13px] font-bold text-slate-800">{{ file.name }}</div>
+                        <div class="mt-1 text-[12px] font-medium text-slate-400">
+                          {{ formatPricingAttachmentKind(file) }} / {{ formatAttachmentSize(file.size) }}
+                        </div>
+                        <div class="mt-1 text-[12px] font-semibold" :class="canOpenPricingAttachment(file) ? 'text-sky-600' : 'text-slate-400'">
+                          {{ canOpenPricingAttachment(file) ? 'Click to open' : 'Re-upload in this session to open' }}
+                        </div>
+                      </button>
+                      <a-space size="small">
+                        <a-button
+                          v-if="canOpenPricingAttachment(file)"
+                          type="default"
+                          size="small"
+                          class="rounded-lg border-slate-200 px-3 text-[12px] font-bold text-slate-700 hover:border-sky-300 hover:text-sky-600"
+                          @click="openPricingAttachment(file)"
+                        >
+                          <template #icon><download-outlined /></template>
+                          Open
+                        </a-button>
+                        <a-button
+                          v-if="canEditPricingMeta"
+                          type="text"
+                          size="small"
+                          class="text-slate-400 hover:text-rose-500 hover:bg-rose-50"
+                          @click="handleRemoveProposalAttachment(file.uid)"
+                        >
+                          Remove
+                        </a-button>
+                      </a-space>
+                    </div>
+                  </div>
                 </a-form-item>
               </a-col>
             </a-row>
@@ -1246,7 +2129,7 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
                 <span class="text-[12px] font-bold text-slate-700 tabular-nums">{{ formatProposalTimestamp(selectedProposal.updatedAt) }}</span>
               </div>
             </div>
-            <a-button type="primary" @click="handleAddMethod(selectedProposal.id)" class="h-[40px] px-5 rounded-lg font-bold flex items-center gap-2 bg-[#0284c7] border-none shadow-sm">
+            <a-button v-if="canMutatePricing" type="primary" @click="handleAddMethod(selectedProposal.id)" class="h-[40px] px-5 rounded-lg font-bold flex items-center gap-2 bg-[#0284c7] border-none shadow-sm">
               <template #icon><plus-outlined /></template>
               Add Payment Method
             </a-button>
@@ -1272,7 +2155,7 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
               <template #default="{ record }">
                 <div class="flex flex-col gap-2">
                   <span class="font-bold text-slate-800 text-[13px]">{{ formatMethodName(record.method) }}</span>
-                  <div class="flex items-center gap-2" @click.stop>
+                  <div v-if="canMutatePricing" class="flex items-center gap-2" @click.stop>
                     <a-button type="link" size="small" @click.stop="openRenameMethodModal(selectedProposal.id, record)" class="text-[#0284c7] font-bold p-0 h-auto text-[11px]">Rename</a-button>
                     <a-button type="link" size="small" @click.stop="confirmDuplicateMethod(selectedProposal.id, record)" class="text-slate-500 font-bold p-0 h-auto text-[11px]">Duplicate</a-button>
                   </div>
@@ -1498,13 +2381,29 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
       </div>
 
       <!-- Detail Editor View -->
-      <div v-if="currentView === 'detail'">
+      <div v-if="currentView === 'detail' && selectedProposal">
         <div class="mb-8">
           <a-breadcrumb separator="/">
-            <a-breadcrumb-item @click="store.setView('detail')" class="cursor-pointer text-slate-400 hover:text-sky-600 transition-colors text-[13px] font-medium">Corridor Detail</a-breadcrumb-item>
-            <a-breadcrumb-item @click="currentView = 'list'" class="cursor-pointer text-slate-400 hover:text-sky-600 transition-colors text-[13px] font-medium">Pricing</a-breadcrumb-item>
-            <a-breadcrumb-item v-if="selectedProposalId" @click="currentView = 'methodList'" class="cursor-pointer text-slate-400 hover:text-sky-600 transition-colors text-[13px] font-medium">{{ selectedProposal?.customProposalType || 'Pricing Schedule' }}</a-breadcrumb-item>
-            <a-breadcrumb-item class="text-slate-900 font-bold text-[13px]">Configure Payment Method</a-breadcrumb-item>
+            <a-breadcrumb-item @click="handlePricingRootBreadcrumb" class="cursor-pointer text-slate-400 hover:text-sky-600 transition-colors text-[13px] font-medium">
+              {{ pricingScopedRootLabel }}
+            </a-breadcrumb-item>
+            <a-breadcrumb-item
+              v-if="!isProposalScopedEntry && !isApprovalReviewScopedEntry && !isFundProposalScopedEntry"
+              @click="returnToProposalList"
+              class="cursor-pointer text-slate-400 hover:text-sky-600 transition-colors text-[13px] font-medium"
+            >
+              Pricing
+            </a-breadcrumb-item>
+            <a-breadcrumb-item
+              v-if="selectedProposalId"
+              @click="returnToMethodList"
+              class="cursor-pointer text-slate-400 hover:text-sky-600 transition-colors text-[13px] font-medium"
+            >
+              {{ selectedProposal?.customProposalType || 'Pricing Schedule' }}
+            </a-breadcrumb-item>
+            <a-breadcrumb-item class="text-slate-900 font-bold text-[13px]">
+            {{ isPricingReadonlyScopedEntry ? 'View Payment Method' : 'Configure Payment Method' }}
+            </a-breadcrumb-item>
           </a-breadcrumb>
         </div>
         <div class="mb-5 flex flex-wrap items-center gap-3">
@@ -1521,69 +2420,15 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
           :open="true"
           :initial-data="activePaymentMethod"
           :proposal-mode="activeProposal?.mode || activeCooperationMode"
-          @update:open="currentView = selectedProposalId ? 'methodList' : 'list'"
+          :force-read-only="isPricingReadonlyScopedEntry"
+          :breadcrumb-root-label="pricingScopedRootLabel"
+          :breadcrumb-section-label="isPricingReadonlyScopedEntry ? 'Pricing Schedule' : 'Pricing'"
+          :breadcrumb-proposal-label="selectedProposal?.customProposalType || 'Pricing Schedule'"
+          :read-only-description="isApprovalReviewScopedEntry ? 'FI Supervisor is reviewing this payment method in read-only mode.' : isFundReadonlyScopedEntry ? 'Treasury is viewing the mirrored payment method snapshot in read-only mode.' : undefined"
+          @update:open="handleMethodEditorClose"
           @save="onSaveMethod"
         />
       </div>
-
-      <section class="mt-6">
-        <a-card
-          class="rounded-[24px] border border-slate-200 bg-white shadow-[0_18px_42px_-30px_rgba(15,23,42,0.28)]"
-          :body-style="{ padding: '24px' }"
-        >
-          <div class="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <div class="text-[12px] font-black uppercase tracking-[0.18em] text-slate-400">Shared History</div>
-              <h3 class="mt-2 mb-0 text-[22px] font-black text-slate-950">{{ currentHistoryProposal?.customProposalType || 'Pricing Schedule' }}</h3>
-              <p class="mt-2 mb-0 text-[13px] font-medium leading-relaxed text-slate-500">
-                Only submission and approval actions are recorded here for the current pricing schedule.
-              </p>
-            </div>
-            <a-tag
-              :style="{ backgroundColor: getWorkflowStatusTheme(currentHistoryProposalStatus).bg, color: getWorkflowStatusTheme(currentHistoryProposalStatus).text, border: 'none', borderRadius: '999px', fontWeight: 800, padding: '4px 12px' }"
-            >
-              {{ currentHistoryProposalStatus }}
-            </a-tag>
-          </div>
-
-          <div v-if="pricingHistoryEntries.length" class="mt-5 space-y-4">
-            <div
-              v-for="entry in pricingHistoryEntries"
-              :key="entry.key"
-              class="rounded-[20px] border border-slate-200 bg-slate-50/70 p-5"
-            >
-              <div class="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <div class="text-[13px] font-black text-slate-900">{{ entry.title }}</div>
-                </div>
-                <a-tag
-                  :style="{ backgroundColor: getWorkflowStatusTheme(entry.status).bg, color: getWorkflowStatusTheme(entry.status).text, border: 'none', borderRadius: '999px', fontWeight: 800, padding: '4px 12px' }"
-                >
-                  {{ normalizeWorkflowStatusLabel(entry.status) }}
-                </a-tag>
-              </div>
-
-              <div class="mt-4 grid gap-4 md:grid-cols-2">
-                <div>
-                  <div class="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">Updated At</div>
-                  <div class="mt-2 text-[13px] font-semibold text-slate-700">{{ entry.time }}</div>
-                </div>
-                <div>
-                  <div class="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">Actor</div>
-                  <div class="mt-2 text-[13px] font-semibold text-slate-700">{{ entry.actor }}</div>
-                </div>
-                <div class="md:col-span-2">
-                  <div class="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">Notes</div>
-                  <div class="mt-2 text-[13px] font-semibold leading-relaxed text-slate-700">
-                    {{ entry.note || 'No notes recorded for this update.' }}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-          <a-empty v-else class="mt-5" description="No pricing schedule history yet." />
-        </a-card>
-      </section>
     </div>
 
     <!-- 辅助弹窗 -->
@@ -1610,6 +2455,7 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
               <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Merchant</span></template>
               <a-input
                 v-model:value="addFormState.merchant"
+                :maxlength="INPUT_LIMITS.name"
                 placeholder="Enter merchant name"
                 class="rounded-xl h-[44px] border-slate-200"
               />
@@ -1619,7 +2465,9 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
               <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Referral Rule</span></template>
               <a-textarea
                 v-model:value="addFormState.referralRule"
+                :maxlength="INPUT_LIMITS.note"
                 :rows="5"
+                show-count
                 placeholder="Input referral rule"
                 class="rounded-xl border-slate-200"
               />
@@ -1647,13 +2495,20 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
 
             <a-form-item v-if="addFormState.type === 'Other'" required>
               <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Please Specify Verticals</span></template>
-              <a-input v-model:value="addFormState.customType" placeholder="e.g. Gaming, Travel" class="rounded-xl h-[44px] border-slate-200" />
+              <a-input v-model:value="addFormState.customType" :maxlength="INPUT_LIMITS.name" placeholder="e.g. Gaming, Travel" class="rounded-xl h-[44px] border-slate-200" />
             </a-form-item>
           </template>
 
           <a-form-item>
             <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Pricing Schedule Document</span></template>
-            <a-upload-dragger class="bg-slate-50/50 border-dashed border-slate-200 rounded-2xl py-8">
+            <a-upload-dragger
+              class="bg-slate-50/50 border-dashed border-slate-200 rounded-2xl py-8"
+              multiple
+              :accept="pricingAttachmentAccept"
+              :before-upload="preventProposalAttachmentUpload"
+              :file-list="getAddProposalAttachmentFileList()"
+              @change="handleAddProposalAttachmentChange"
+            >
               <div class="ant-upload-drag-icon">
                 <div class="w-14 h-14 bg-white rounded-xl shadow-sm border border-slate-100 flex items-center justify-center mx-auto mb-4">
                   <inbox-outlined class="text-2xl text-sky-600" />
@@ -1666,12 +2521,12 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
 
           <a-form-item>
             <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Document Link</span></template>
-            <a-input v-model:value="addFormState.link" placeholder="Paste the uploaded pricing schedule document link" class="rounded-xl h-[44px] border-slate-200" />
+            <a-input v-model:value="addFormState.link" :maxlength="INPUT_LIMITS.url" placeholder="Paste the uploaded pricing schedule document link" class="rounded-xl h-[44px] border-slate-200" />
           </a-form-item>
 
           <a-form-item class="mb-0">
             <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Remark</span></template>
-            <a-textarea v-model:value="addFormState.remark" :rows="4" placeholder="Optional internal notes for this pricing schedule." class="rounded-xl border-slate-200" />
+            <a-textarea v-model:value="addFormState.remark" :maxlength="INPUT_LIMITS.note" :rows="4" show-count placeholder="Optional internal notes for this pricing schedule." class="rounded-xl border-slate-200" />
           </a-form-item>
         </a-form>
       </div>
@@ -1684,6 +2539,7 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
       centered
       :width="1460"
       class="fitrem-modal payment-method-create-modal"
+      :mask-closable="false"
       destroy-on-close
       @ok="() => paymentMethodDrawerRef?.handleSave()"
     >
@@ -1724,7 +2580,7 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
       <a-form layout="vertical" class="pt-2">
         <a-form-item required>
           <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Pricing Schedule Name</span></template>
-          <a-input v-model:value="renameFormState.name" placeholder="Enter pricing schedule name" class="rounded-xl h-[44px] border-slate-200" />
+          <a-input v-model:value="renameFormState.name" :maxlength="INPUT_LIMITS.name" placeholder="Enter pricing schedule name" class="rounded-xl h-[44px] border-slate-200" />
         </a-form-item>
       </a-form>
     </a-modal>
@@ -1747,7 +2603,7 @@ const handleSubmitPricingForReview = (proposalId?: string) => {
       <a-form layout="vertical" class="pt-2">
         <a-form-item required>
           <template #label><span class="text-[13px] font-black text-slate-700 uppercase tracking-widest">Payment Method Name</span></template>
-          <a-input v-model:value="renameMethodFormState.name" placeholder="Enter payment method name" class="rounded-xl h-[44px] border-slate-200" />
+          <a-input v-model:value="renameMethodFormState.name" :maxlength="INPUT_LIMITS.name" placeholder="Enter payment method name" class="rounded-xl h-[44px] border-slate-200" />
         </a-form-item>
       </a-form>
     </a-modal>

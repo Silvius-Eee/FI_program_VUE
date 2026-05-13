@@ -25,7 +25,11 @@ const LegalFiDetailPage = defineAsyncComponent(() => import('./components/LegalF
 const LegalApprovalWorkspace = defineAsyncComponent(() => import('./components/LegalApprovalWorkspace.vue'));
 const PricingApprovalWorkspace = defineAsyncComponent(() => import('./components/PricingApprovalWorkspace.vue'));
 const PricingApprovalDetailPage = defineAsyncComponent(() => import('./components/PricingApprovalDetailPage.vue'));
+const LaunchApprovalWorkspace = defineAsyncComponent(() => import('./components/LaunchApprovalWorkspace.vue'));
 const TechWorkspace = defineAsyncComponent(() => import('./components/TechWorkspace.vue'));
+const FundWorkspace = defineAsyncComponent(() => import('./components/FundWorkspace.vue'));
+const FundDetailPage = defineAsyncComponent(() => import('./components/FundDetailPage.vue'));
+const FundSubmitPage = defineAsyncComponent(() => import('./components/FundSubmitPage.vue'));
 
 const store = useAppStore();
 
@@ -33,7 +37,19 @@ const detailToolbarRef = ref<HTMLElement | null>(null);
 const detailToolbarHeight = ref(DEFAULT_DETAIL_TOOLBAR_HEIGHT);
 
 const hasFixedDetailToolbar = computed(() => {
-  return (store.view === 'detail' || store.view === 'pricing') && store.role === 'FI' && !!detailToolbar.value;
+  return (
+    (store.view === 'detail' || store.view === 'pricing')
+    && (
+      store.role === 'FI'
+      || store.role === 'FI Supervisor'
+      || (
+        store.role === 'Fund'
+        && store.view === 'pricing'
+        && (store.pricingEntryMode === 'fundProposalScoped' || store.pricingEntryMode === 'fundMethodScoped')
+      )
+    )
+    && !!detailToolbar.value
+  );
 });
 
 const contentTopOffset = computed(() => {
@@ -64,8 +80,24 @@ onMounted(() => {
   }
 });
 
-const handleRoleChange = (val: string) => {
-  store.setRole(val);
+const getUserRoleLabel = (role: string) => {
+  if (role === 'FI_SUPERVISOR') return 'FI Supervisor';
+  if (role === 'COMPLIANCE') return 'Compliance';
+  if (role === 'LEGAL') return 'Legal';
+  if (role === 'TECH') return 'Tech';
+  if (role === 'FUND') return 'Fund';
+  return role;
+};
+
+const resolveUserIcon = (role: string) => {
+  if (role === 'FI_SUPERVISOR' || role === 'COMPLIANCE') return SafetyCertificateOutlined;
+  if (role === 'LEGAL') return ReadOutlined;
+  if (role === 'TECH') return CodeOutlined;
+  return UserOutlined;
+};
+
+const handleCurrentUserChange = (userId: string) => {
+  store.setCurrentUser(userId);
 };
 
 </script>
@@ -122,52 +154,39 @@ const handleRoleChange = (val: string) => {
         </div>
         <div class="flex items-center">
           <a-select
-            :value="store.role"
-            @change="handleRoleChange"
+            :value="store.currentUserId"
+            @change="handleCurrentUserChange"
             :bordered="false"
             class="fitrem-role-selector"
             :dropdown-match-select-width="true"
             placement="bottomRight"
             popup-class-name="fitrem-role-dropdown"
+            option-label-prop="label"
           >
             <template #suffixIcon>
               <div class="text-[10px] text-slate-300">▼</div>
             </template>
 
-            <a-select-option value="FI">
+            <a-select-option
+              v-for="user in store.users"
+              :key="user.id"
+              :value="user.id"
+              :label="`${user.name} · ${getUserRoleLabel(user.role)}`"
+            >
               <div class="flex items-center gap-2.5 px-1 py-1">
-                <user-outlined :style="{ color: store.role === 'FI' ? '#0f172a' : '#94a3b8' }" class="text-[15px]" />
-                <span class="text-[13px] font-bold" :style="{ color: store.role === 'FI' ? '#0f172a' : '#475569' }">FI</span>
-              </div>
-            </a-select-option>
-            <a-select-option value="Fund">
-              <div class="flex items-center gap-2.5 px-1 py-1">
-                <user-outlined :style="{ color: store.role === 'Fund' ? '#0f172a' : '#94a3b8' }" class="text-[15px]" />
-                <span class="text-[13px] font-bold" :style="{ color: store.role === 'Fund' ? '#0f172a' : '#475569' }">Fund</span>
-              </div>
-            </a-select-option>
-            <a-select-option value="FI Supervisor">
-              <div class="flex items-center gap-2.5 px-1 py-1">
-                <safety-certificate-outlined :style="{ color: store.role === 'FI Supervisor' ? '#0f172a' : '#94a3b8' }" class="text-[15px]" />
-                <span class="text-[13px] font-bold" :style="{ color: store.role === 'FI Supervisor' ? '#0f172a' : '#475569' }">FI Supervisor</span>
-              </div>
-            </a-select-option>
-            <a-select-option value="Compliance">
-              <div class="flex items-center gap-2.5 px-1 py-1">
-                <safety-certificate-outlined :style="{ color: store.role === 'Compliance' ? '#0f172a' : '#94a3b8' }" class="text-[15px]" />
-                <span class="text-[13px] font-bold" :style="{ color: store.role === 'Compliance' ? '#0f172a' : '#475569' }">Compliance</span>
-              </div>
-            </a-select-option>
-            <a-select-option value="Legal">
-              <div class="flex items-center gap-2.5 px-1 py-1">
-                <read-outlined :style="{ color: store.role === 'Legal' ? '#0f172a' : '#94a3b8' }" class="text-[15px]" />
-                <span class="text-[13px] font-bold" :style="{ color: store.role === 'Legal' ? '#0f172a' : '#475569' }">Legal Hub</span>
-              </div>
-            </a-select-option>
-            <a-select-option value="Tech">
-              <div class="flex items-center gap-2.5 px-1 py-1">
-                <code-outlined :style="{ color: store.role === 'Tech' ? '#0f172a' : '#94a3b8' }" class="text-[15px]" />
-                <span class="text-[13px] font-bold" :style="{ color: store.role === 'Tech' ? '#0f172a' : '#475569' }">Tech Portal</span>
+                <component
+                  :is="resolveUserIcon(user.role)"
+                  :style="{ color: store.currentUserId === user.id ? '#0f172a' : '#94a3b8' }"
+                  class="text-[15px]"
+                />
+                <div class="min-w-0">
+                  <div class="text-[13px] font-bold" :style="{ color: store.currentUserId === user.id ? '#0f172a' : '#475569' }">
+                    {{ user.name }}
+                  </div>
+                  <div class="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                    {{ getUserRoleLabel(user.role) }}
+                  </div>
+                </div>
               </div>
             </a-select-option>
           </a-select>
@@ -272,17 +291,26 @@ const handleRoleChange = (val: string) => {
         <div v-else-if="store.view === 'kycReviewDetail'">
           <KycReviewDetailPage />
         </div>
-        <div v-else-if="store.view === 'ndaDetail'">
-          <LegalFiDetailPage docType="NDA" />
-        </div>
-        <div v-else-if="store.view === 'msaDetail'">
-          <LegalFiDetailPage docType="MSA" />
+        <div v-else-if="store.view === 'legalDetail' || store.view === 'ndaDetail' || store.view === 'msaDetail'">
+          <LegalFiDetailPage />
         </div>
         <div v-else-if="store.view === 'pricingApprovalDetail'" class="py-8 px-4">
           <PricingApprovalDetailPage />
         </div>
-        <div v-else-if="store.role === 'FI Supervisor'" class="py-8 px-4">
+        <div v-else-if="store.view === 'pricingApprovalWorkspace'" class="py-8 px-4">
           <PricingApprovalWorkspace :isStandalone="true" />
+        </div>
+        <div v-else-if="store.view === 'launchApprovalWorkspace'" class="py-8 px-4">
+          <LaunchApprovalWorkspace />
+        </div>
+        <div v-else-if="store.view === 'legalApprovalWorkspace'" class="py-8 px-4">
+          <LegalApprovalWorkspace :isStandalone="true" />
+        </div>
+        <div v-else-if="store.view === 'fundDetail'" class="py-8 px-4">
+          <FundDetailPage />
+        </div>
+        <div v-else-if="store.view === 'fundSubmit'" class="py-8 px-4">
+          <FundSubmitPage />
         </div>
         <div v-else-if="store.role === 'Compliance'" class="py-8 px-4">
           <KycReviewWorkspace :isStandalone="true" />
@@ -298,6 +326,9 @@ const handleRoleChange = (val: string) => {
         </div>
         <div v-else-if="store.view === 'pricing'">
           <PricingManagementPage @registerToolbar="setDetailToolbar" :topOffset="contentTopOffset" />
+        </div>
+        <div v-else-if="store.view === 'fundWorkspace'" class="py-8 px-4">
+          <FundWorkspace />
         </div>
         <div v-else-if="store.view === 'form'">
           <ChannelOnboarding />

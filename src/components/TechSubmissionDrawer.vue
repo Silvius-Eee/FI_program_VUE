@@ -7,6 +7,7 @@ import {
 } from '@ant-design/icons-vue';
 import { message } from 'ant-design-vue';
 import { createTechStepsData } from '../constants/initialData';
+import { INPUT_LIMITS, showTextLimitWarning } from '../constants/inputLimits';
 
 const props = defineProps<{
   open: boolean;
@@ -36,6 +37,10 @@ const handleClose = () => {
 };
 
 const handleSubmit = () => {
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Technical Documentation', value: formState.techRawInfo, max: INPUT_LIMITS.techRawInfo },
+  ])) return;
+
   message.success('Technical information synced successfully');
   emit('submit', { ...formState });
   emit('update:open', false);
@@ -96,7 +101,9 @@ watch(() => props.open, (newVal) => {
                   </template>
                   <a-textarea 
                     v-model:value="formState.techRawInfo" 
+                    :maxlength="INPUT_LIMITS.techRawInfo"
                     :rows="12" 
+                    show-count
                     placeholder="Paste all technical emails, doc links, and credentials here..."
                     class="rounded-xl border-slate-200 mt-2" 
                   />

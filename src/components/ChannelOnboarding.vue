@@ -42,12 +42,12 @@
                     <template #label>
                       <span class="label-style">
                         Corridor Name
-                        <a-tooltip title="Name the corridor with the label your team will use internally.">
+                        <a-tooltip title="Internal display name for this corridor.">
                           <info-circle-outlined style="font-size: 14px; color: #94a3b8" />
                         </a-tooltip>
                       </span>
                     </template>
-                    <a-input v-model:value="formState.channelName" placeholder="Stripe, Worldpay, Rapyd..." size="large" />
+                    <a-input v-model:value="formState.channelName" :maxlength="INPUT_LIMITS.name" placeholder="Stripe, Worldpay, Rapyd..." size="large" />
                   </a-form-item>
                 </a-col>
 
@@ -55,8 +55,8 @@
                   <a-form-item required style="margin-bottom: 0">
                     <template #label>
                       <span class="label-style">
-                        Point of Contact (POC)
-                        <a-tooltip title="Capture the first reachable business contact from the corridor side.">
+                        General Contact
+                        <a-tooltip title="Main point of contact for daily operations.">
                           <info-circle-outlined style="font-size: 14px; color: #94a3b8" />
                         </a-tooltip>
                       </span>
@@ -67,7 +67,7 @@
                         :rules="[{ required: true, message: 'Name is required' }]"
                         style="margin-bottom: 0"
                       >
-                        <a-input v-model:value="formState.pocName" placeholder="e.g., Jane Doe" size="large" />
+                        <a-input v-model:value="formState.pocName" :maxlength="INPUT_LIMITS.contactName" placeholder="e.g., Jane Doe" size="large" />
                       </a-form-item>
 
                       <a-form-item name="pocMethod" style="margin-bottom: 0">
@@ -90,7 +90,7 @@
                           :rules="[{ required: true, message: 'Please specify the contact method.' }]"
                           style="margin-bottom: 0"
                         >
-                          <a-input v-model:value="formState.otherPocDetail" placeholder="Specify method and contact details" size="large" />
+                          <a-input v-model:value="formState.otherPocDetail" :maxlength="INPUT_LIMITS.contactValue" placeholder="Specify method and contact details" size="large" />
                         </a-form-item>
                       </div>
                       <div v-else>
@@ -99,7 +99,7 @@
                           :rules="[{ required: true, message: 'Contact detail is required.' }]"
                           style="margin-bottom: 0"
                         >
-                          <a-input v-model:value="formState.pocDetail" :placeholder="getPocPlaceholder(formState.pocMethod)" size="large" />
+                          <a-input v-model:value="formState.pocDetail" :maxlength="INPUT_LIMITS.contactValue" :placeholder="getPocPlaceholder(formState.pocMethod)" size="large" />
                         </a-form-item>
                       </div>
                     </div>
@@ -118,7 +118,7 @@
                       <div>
                         <span class="label-style">Cooperation Model</span>
                         <p class="section-description m-0">
-                          Select the models currently in scope. If it is not confirmed yet, choose 'I'm not sure yet'.
+                          Confirmed commercial setup (e.g., PayFac, Referral, MoR).
                         </p>
                       </div>
                     </template>
@@ -163,7 +163,7 @@
                       <div>
                         <span class="label-style">Supported Products</span>
                         <p class="section-description m-0">
-                          Select the product lines currently in scope for this corridor.
+                          Product lines confirmed for this corridor.
                         </p>
                       </div>
                     </template>
@@ -222,7 +222,7 @@
 <script setup lang="ts">
 import { h, ref, reactive } from 'vue';
 import { useAppStore } from '../stores/app';
-import { Modal } from 'ant-design-vue';
+import { Modal, message } from 'ant-design-vue';
 import { 
   ArrowLeftOutlined, 
   InfoCircleOutlined,
@@ -230,7 +230,8 @@ import {
 } from '@ant-design/icons-vue';
 import dayjs from 'dayjs';
 import { supportedProductOptions } from '../constants/channelOptions';
-import { createTechStepsData } from '../constants/initialData';
+import { createTechStepsData, type ChannelAssignment } from '../constants/initialData';
+import { INPUT_LIMITS, showTextLimitWarning } from '../constants/inputLimits';
 import type { CheckboxValueType } from 'ant-design-vue/es/checkbox/interface';
 
 const store = useAppStore();
@@ -325,11 +326,50 @@ const isChoiceDisabled = (field: ExclusiveField, optionValue: string) => {
   return formState[field].includes(unsureOption) && optionValue !== unsureOption;
 };
 
+const buildCreatorAssignment = (timestamp: string): ChannelAssignment => {
+  if (store.currentUserRole === 'FIOP') {
+    return {
+      primaryFiopUserId: store.currentUserId,
+      primaryFibdUserId: null,
+      fiopCollaboratorUserIds: [store.currentUserId],
+      fibdCollaboratorUserIds: [],
+      updatedAt: timestamp,
+      updatedByUserId: store.currentUserId,
+    };
+  }
+
+  if (store.currentUserRole === 'FIBD') {
+    return {
+      primaryFiopUserId: null,
+      primaryFibdUserId: store.currentUserId,
+      fiopCollaboratorUserIds: [],
+      fibdCollaboratorUserIds: [store.currentUserId],
+      updatedAt: timestamp,
+      updatedByUserId: store.currentUserId,
+    };
+  }
+
+  return {
+    primaryFiopUserId: null,
+    primaryFibdUserId: null,
+    fiopCollaboratorUserIds: [],
+    fibdCollaboratorUserIds: [],
+    updatedAt: timestamp,
+    updatedByUserId: store.currentUserId,
+  };
+};
+
 const onFinish = () => {
-  loading.value = true;
-  
   const { pocMethod, pocDetail, otherPocDetail, ...rest } = formState;
   const contactDetail = pocMethod === 'Other' ? otherPocDetail : pocDetail;
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Corridor Name', value: formState.channelName, max: INPUT_LIMITS.name },
+    { label: 'General Contact Name', value: formState.pocName, max: INPUT_LIMITS.contactName },
+    { label: 'General Contact Detail', value: contactDetail, max: INPUT_LIMITS.contactValue },
+  ])) return;
+
+  loading.value = true;
+
   const timestamp = dayjs().format('YYYY-MM-DD HH:mm:ss');
 
   setTimeout(() => {
@@ -340,6 +380,7 @@ const onFinish = () => {
       status: 'Ongoing',
       createdAt: timestamp,
       lastModifiedAt: timestamp,
+      assignment: buildCreatorAssignment(timestamp),
       pocMethod: pocMethod === 'Other' ? contactDetail : pocMethod,
       pocDetail: contactDetail,
       companyName: '',

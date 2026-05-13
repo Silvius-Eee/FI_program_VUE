@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive } from 'vue';
 import { message } from 'ant-design-vue';
+import { INPUT_LIMITS, showTextLimitWarning } from '../constants/inputLimits';
 
 const props = defineProps<{
   channel: any;
@@ -28,6 +29,10 @@ const handleSubmit = () => {
     message.warning('Please select at least one contracting entity.');
     return;
   }
+  if (showTextLimitWarning(message.warning, [
+    { label: 'Audit Trail / Remarks', value: formState.remarks, max: INPUT_LIMITS.note },
+  ])) return;
+
   message.success('Pricing schedule saved and updated');
   emit('submit', { ...formState });
 };
@@ -85,7 +90,9 @@ const handleSubmit = () => {
             </template>
             <a-textarea
               v-model:value="formState.remarks"
+              :maxlength="INPUT_LIMITS.note"
               :rows="4"
+              show-count
               placeholder="E.g., Corridor provided a customized pricing schedule for HK market..."
               class="rounded-xl border-slate-200 mt-2"
             />

@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
+import { ArrowLeftOutlined } from '@ant-design/icons-vue';
 import { useAppStore } from '../stores/app';
 import {
   buildPricingApprovalQueueRows,
+  PRICING_COMPLETED_STATUS,
+  PRICING_LEGAL_REVIEW_STATUS,
   type PricingApprovalQueueRow,
   type PricingApprovalQueueTab,
 } from '../constants/initialData';
 import { getWorkflowStatusTheme, normalizeWorkflowStatusLabel } from '../utils/workflowStatus';
+import { INPUT_LIMITS } from '../constants/inputLimits';
 
 defineProps<{
   isStandalone?: boolean;
@@ -14,32 +18,66 @@ defineProps<{
 
 const store = useAppStore();
 
-const activeTab = ref<PricingApprovalQueueTab>('pending');
+type PricingApprovalWorkspaceTab = Exclude<PricingApprovalQueueTab, 'approved'> | 'legal_review' | 'completed';
+
+const activeTab = ref<PricingApprovalWorkspaceTab>('pending');
 const keyword = ref('');
 const owner = ref('all');
 
-const allRows = computed(() => buildPricingApprovalQueueRows(store.channelList));
+const normalizeQueueText = (value: unknown, fallback = '') => {
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    return normalized || fallback;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return fallback;
+};
+
+const allRows = computed(() => {
+  try {
+    return buildPricingApprovalQueueRows(store.channelList);
+  } catch (error) {
+    console.error('Failed to build pricing approval queue rows.', error);
+    return [];
+  }
+});
+
+const getWorkspaceTab = (row: PricingApprovalQueueRow): PricingApprovalWorkspaceTab | null => {
+  if (row.queueTab === 'pending' || row.queueTab === 'changes_requested') return row.queueTab;
+
+  if (row.queueTab === 'approved') {
+    const normalizedStatus = normalizeWorkflowStatusLabel(row.status);
+    if (normalizedStatus === PRICING_LEGAL_REVIEW_STATUS) return 'legal_review';
+    if (normalizedStatus === PRICING_COMPLETED_STATUS) return 'completed';
+  }
+
+  return null;
+};
 
 const tabCounts = computed(() => ({
-  pending: allRows.value.filter((row) => row.queueTab === 'pending').length,
-  changes_requested: allRows.value.filter((row) => row.queueTab === 'changes_requested').length,
-  approved: allRows.value.filter((row) => row.queueTab === 'approved').length,
+  pending: allRows.value.filter((row) => getWorkspaceTab(row) === 'pending').length,
+  changes_requested: allRows.value.filter((row) => getWorkspaceTab(row) === 'changes_requested').length,
+  legal_review: allRows.value.filter((row) => getWorkspaceTab(row) === 'legal_review').length,
+  completed: allRows.value.filter((row) => getWorkspaceTab(row) === 'completed').length,
 }));
 
 const tabOptions = computed(() => ([
-  { label: `Pending (${tabCounts.value.pending})`, value: 'pending' },
-  { label: `Returned (${tabCounts.value.changes_requested})`, value: 'changes_requested' },
-  { label: `Approved (${tabCounts.value.approved})`, value: 'approved' },
+  { label: 'Pending', value: 'pending' as const, count: tabCounts.value.pending },
+  { label: 'Returned', value: 'changes_requested' as const, count: tabCounts.value.changes_requested },
+  { label: 'Legal Review', value: 'legal_review' as const, count: tabCounts.value.legal_review },
+  { label: 'Completed', value: 'completed' as const, count: tabCounts.value.completed },
 ]));
 
 const ownerOptions = computed(() => ([
-  { label: 'All FI owners', value: 'all' },
+  { label: 'All FIOPs', value: 'all' },
   ...[...new Set(
     allRows.value
-      .filter((row) => row.queueTab === activeTab.value)
-      .map((row) => row.fiOwner),
+      .filter((row) => getWorkspaceTab(row) === activeTab.value)
+      .map((row) => normalizeQueueText(row.fiOwner))
+      .filter(Boolean),
   )]
-    .filter(Boolean)
     .sort((left, right) => left.localeCompare(right))
     .map((fiOwner) => ({ label: fiOwner, value: fiOwner })),
 ]));
@@ -48,73 +86,68 @@ const filteredRows = computed(() => {
   const normalizedKeyword = keyword.value.trim().toLowerCase();
 
   return allRows.value
-    .filter((row) => row.queueTab === activeTab.value)
-    .filter((row) => !normalizedKeyword || row.corridorName.toLowerCase().includes(normalizedKeyword))
-    .filter((row) => owner.value === 'all' || row.fiOwner === owner.value)
+    .filter((row) => getWorkspaceTab(row) === activeTab.value)
+    .filter((row) => !normalizedKeyword || normalizeQueueText(row.corridorName).toLowerCase().includes(normalizedKeyword))
+    .filter((row) => owner.value === 'all' || normalizeQueueText(row.fiOwner) === owner.value)
     .sort((left, right) => new Date(right.latestActionAt || 0).getTime() - new Date(left.latestActionAt || 0).getTime());
 });
 
 const columns = computed(() => {
-  if (activeTab.value === 'changes_requested') {
-    return [
-      { title: 'Corridor', key: 'corridorName' },
-      { title: 'Quotation', key: 'quotationName' },
-      { title: 'FI Owner', key: 'fiOwner' },
-      { title: 'Returned At', key: 'latestActionAt' },
-      { title: 'Reviewer Note', key: 'latestActionNote' },
-      { title: 'Action', key: 'action' },
-    ];
-  }
-
-  if (activeTab.value === 'approved') {
-    return [
-      { title: 'Corridor', key: 'corridorName' },
-      { title: 'Quotation', key: 'quotationName' },
-      { title: 'FI Owner', key: 'fiOwner' },
-      { title: 'Approved At', key: 'latestActionAt' },
-      { title: 'Approver', key: 'latestActionUser' },
-      { title: 'Action', key: 'action' },
-    ];
-  }
-
   return [
     { title: 'Corridor', key: 'corridorName' },
     { title: 'Quotation', key: 'quotationName' },
     { title: 'Cooperation Mode', key: 'cooperationMode' },
-    { title: 'FI Owner', key: 'fiOwner' },
+    { title: 'FIOP', key: 'fiOwner' },
     { title: 'Submitted At', key: 'submittedAt' },
     { title: 'Status', key: 'status' },
+    { title: 'Latest Update', key: 'latestActionAt' },
+    { title: 'Actor', key: 'latestActionUser' },
+    { title: 'Reviewer Note', key: 'latestActionNote' },
     { title: 'Action', key: 'action' },
   ];
 });
 
 const queueSubtitle = computed(() => {
   if (activeTab.value === 'changes_requested') {
-    return 'Review quotations that were sent back to FI and reopen any record to check the latest reviewer note.';
+    return 'Review quotations under corridor review and reopen any record to check the latest reviewer note.';
   }
-  if (activeTab.value === 'approved') {
-    return 'Review completed approvals and reopen any record to confirm the final pricing package and approval trail.';
+  if (activeTab.value === 'legal_review') {
+    return 'Track quotations after FI Supervisor approval while Legal is reviewing the pricing flow.';
   }
-  return 'Work the next quotation waiting for FI Supervisor review, then open the full approval record in one click.';
+  if (activeTab.value === 'completed') {
+    return 'Review quotations whose Legal pricing review has been completed.';
+  }
+  return 'Work the next quotation under FI supervisor review, then open the full approval record in one click.';
 });
 
 const emptyDescription = computed(() => {
   if (activeTab.value === 'changes_requested') {
     return 'No returned pricing approvals match the current filters.';
   }
-  if (activeTab.value === 'approved') {
-    return 'No approved pricing records match the current filters.';
+  if (activeTab.value === 'legal_review') {
+    return 'No Legal review pricing records match the current filters.';
+  }
+  if (activeTab.value === 'completed') {
+    return 'No completed pricing records match the current filters.';
   }
   return 'No pending pricing approvals match the current filters.';
 });
 
+const setActiveTab = (tab: PricingApprovalWorkspaceTab) => {
+  activeTab.value = tab;
+};
+
 const openTask = (row: PricingApprovalQueueRow) => {
-  store.openPricingApprovalDetail(row.channel, row.proposalId);
+  store.openPricingApprovalDetail(row.channel, row.proposalId, { returnView: 'pricingApprovalWorkspace' });
 };
 
 const resetFilters = () => {
   keyword.value = '';
   owner.value = 'all';
+};
+
+const returnToDashboard = () => {
+  store.setView('dashboard');
 };
 
 const buildRowClick = (record: PricingApprovalQueueRow) => ({
@@ -127,6 +160,10 @@ const buildRowClick = (record: PricingApprovalQueueRow) => ({
     <div class="queue-shell">
       <section class="workspace-control-card">
         <div class="workspace-control-card__copy">
+          <a-button type="text" class="workspace-back-button" @click="returnToDashboard">
+            <template #icon><arrow-left-outlined /></template>
+            Back to Dashboard
+          </a-button>
           <div class="workspace-kicker">FI Supervisor queue</div>
           <h2 class="workspace-title">Pricing approval workbench</h2>
           <p class="workspace-subtitle">
@@ -137,16 +174,26 @@ const buildRowClick = (record: PricingApprovalQueueRow) => ({
         <div class="workspace-control-panel">
           <div class="workspace-filter-group">
             <div class="workspace-filter-label">Status</div>
-            <a-segmented
-              v-model:value="activeTab"
-              class="workspace-segmented workspace-segmented--status"
-              :options="tabOptions"
-            />
+            <div class="status-queue-list" role="tablist" aria-label="Pricing approval status">
+              <button
+                v-for="option in tabOptions"
+                :key="option.value"
+                type="button"
+                role="tab"
+                :aria-selected="activeTab === option.value"
+                :class="['status-queue-card', { 'status-queue-card--active': activeTab === option.value }]"
+                @click="setActiveTab(option.value)"
+              >
+                <span class="status-queue-card__label">{{ option.label }}</span>
+                <span class="status-queue-card__count">{{ option.count }}</span>
+              </button>
+            </div>
           </div>
 
           <div class="workspace-inline-tools">
             <a-input
               v-model:value="keyword"
+              :maxlength="INPUT_LIMITS.search"
               allow-clear
               placeholder="Search corridor"
               class="toolbar-control toolbar-control--search"
@@ -179,7 +226,9 @@ const buildRowClick = (record: PricingApprovalQueueRow) => ({
                       ? 'Open to review the submitted quotation.'
                       : activeTab === 'changes_requested'
                         ? 'Open to review what FI needs to revise next.'
-                        : 'Open to review the completed approval record.'
+                        : activeTab === 'legal_review'
+                          ? 'Open to trace Legal review progress.'
+                          : 'Open to trace the completed Legal decision.'
                   }}
                 </div>
               </div>
@@ -217,7 +266,7 @@ const buildRowClick = (record: PricingApprovalQueueRow) => ({
 
             <template v-else-if="column.key === 'action'">
               <a-button type="link" class="action-link" @click.stop="openTask(record)">
-                {{ activeTab === 'pending' ? 'Review' : 'View' }}
+                Details
               </a-button>
             </template>
           </template>
@@ -257,6 +306,20 @@ const buildRowClick = (record: PricingApprovalQueueRow) => ({
 
 .workspace-control-card__copy {
   min-width: 0;
+}
+
+.workspace-back-button {
+  height: 34px;
+  padding-inline: 8px;
+  margin: -4px 0 10px -8px;
+  border-radius: 10px;
+  color: #475569;
+  font-weight: 800;
+}
+
+.workspace-back-button:hover {
+  color: #0f172a;
+  background: #f8fafc;
 }
 
 .workspace-kicker {
@@ -302,27 +365,96 @@ const buildRowClick = (record: PricingApprovalQueueRow) => ({
   text-transform: uppercase;
 }
 
-.workspace-segmented {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  padding: 3px;
+.status-queue-list {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
 }
 
-.workspace-segmented :deep(.ant-segmented-item) {
-  min-height: 36px;
-  border-radius: 9px;
+.status-queue-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 50px;
+  padding: 10px 12px 10px 16px;
+  overflow: hidden;
+  color: #475569;
+  background: #ffffff;
+  border: 1px solid #dbe3ef;
+  border-radius: 12px;
+  cursor: pointer;
+  text-align: left;
+  box-shadow: 0 10px 24px -22px rgba(15, 23, 42, 0.45);
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    color 0.16s ease,
+    transform 0.16s ease;
 }
 
-.workspace-segmented :deep(.ant-segmented-item-label) {
-  padding: 7px 11px;
+.status-queue-card::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  content: '';
+  background: transparent;
+  transition: background-color 0.16s ease;
+}
+
+.status-queue-card:hover {
+  color: #1e3a8a;
+  background: #f0f7ff;
+  border-color: #bfdbfe;
+  box-shadow: 0 14px 28px -24px rgba(37, 99, 235, 0.8);
+  transform: translateY(-1px);
+}
+
+.status-queue-card:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.status-queue-card--active {
+  color: #0f172a;
+  background: #edf6ff;
+  border-color: #60a5fa;
+  box-shadow: 0 16px 32px -24px rgba(37, 99, 235, 0.85);
+}
+
+.status-queue-card--active::before {
+  background: #2563eb;
+}
+
+.status-queue-card__label {
+  min-width: 0;
+  color: inherit;
   font-size: 12px;
-  font-weight: 800;
-  line-height: 1.35;
-  white-space: normal;
+  font-weight: 900;
+  line-height: 1.25;
 }
 
-.workspace-segmented :deep(.ant-segmented-item-selected) {
-  color: #0f172a !important;
+.status-queue-card__count {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 24px;
+  padding: 0 8px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  background: #e2e8f0;
+  border-radius: 999px;
+}
+
+.status-queue-card--active .status-queue-card__count {
+  color: #ffffff;
+  background: #2563eb;
 }
 
 .workspace-inline-tools {
@@ -436,6 +568,10 @@ const buildRowClick = (record: PricingApprovalQueueRow) => ({
 
   .workspace-control-card {
     padding: 18px 16px;
+  }
+
+  .status-queue-list {
+    grid-template-columns: 1fr;
   }
 
   .workspace-inline-tools {

@@ -19,6 +19,12 @@ export const contactMethodOptions = [
   { value: 'Other', label: 'Other', placeholder: 'Specify method and contact details' },
 ];
 
+export const chargebackHandlingOptions = [
+  { value: 'Email', label: 'Email' },
+  { value: 'API', label: 'API' },
+  { value: 'Portal', label: 'Portal' },
+];
+
 export const merchantGeoOptions = [
   { value: 'Global', label: 'Global' },
   ...Object.keys(geoData).map(continent => ({

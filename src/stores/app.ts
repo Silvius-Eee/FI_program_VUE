@@ -1,8 +1,10 @@
 import { defineStore } from 'pinia';
-import { ref, watch } from 'vue';
-import { 
+import { computed, ref, watch } from 'vue';
+import {
+  APP_USERS,
   DASHBOARD_VIEW_STATE_STORAGE_KEY,
   DASHBOARD_FIELD_KEY_MIGRATION_MAP,
+  DEFAULT_CURRENT_USER_ID,
   initialChannels, 
   INITIAL_CORRIDOR_VIEWS, 
   INITIAL_MATRIX_VIEWS,
@@ -15,16 +17,21 @@ import {
   cloneSavedDashboardViews,
   cloneDashboardFieldSchema,
   createTechStepsData,
+  getChannelAssignmentUserIds,
+  normalizeChannelAssignment,
   type DashboardFieldDefinition,
   type DashboardFieldGroup,
   type DashboardFieldSchema,
   type DashboardViewFilterCondition,
   type DashboardViewMode,
   type SavedDashboardView,
+  type AppUser,
+  type AppUserRole,
   normalizePricingRuleCardCatalogItem,
   withChannelDefaults,
 } from '../constants/initialData';
 import type { OnboardingTrack } from '../constants/onboarding';
+import type { WorkflowRole } from '../utils/workflowLifecycle';
 
 type PersistedDashboardViewsState = {
   corridorViews?: unknown;
@@ -36,6 +43,8 @@ type PersistedDashboardViewsState = {
 };
 
 type PersistedChannelDataState = {
+  storageVersion?: unknown;
+  currentUserId?: unknown;
   channelList?: unknown;
   selectedChannelId?: unknown;
   globalPricingRuleCardCatalog?: unknown;
@@ -46,9 +55,14 @@ type PersistedChannelDataState = {
   kycQueueTab?: unknown;
   kycQueueFilters?: unknown;
   kycQueueScrollTop?: unknown;
+  legalQueuePreferredDocType?: unknown;
 };
 
 type KycQueueTab = 'reviewing' | 'preparation' | 'completed' | 'no_need';
+type LegalDetailTab = 'nda' | 'msa' | 'pricing' | 'otherAttachments';
+type LegalQueueDocType = 'NDA' | 'MSA' | 'PRICING' | 'OTHER_ATTACHMENTS';
+type PricingEntryMode = 'default' | 'proposalScoped' | 'approvalReviewScoped' | 'fundProposalScoped' | 'fundMethodScoped';
+type DetailEntryMode = 'default' | 'launchApprovalReadonly';
 
 type KycQueueFilters = {
   keyword: string;
@@ -57,15 +71,110 @@ type KycQueueFilters = {
 };
 
 const CHANNEL_DATA_STORAGE_KEY = 'fi-dashboard-channel-data';
+const CHANNEL_DATA_STORAGE_VERSION = 6;
 const buildKycHubDraftKey = (channelId: unknown, track: OnboardingTrack) => `${String(channelId ?? '')}:${track}`;
 
 const canUseLocalStorage = () => (
   typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
 );
 
+const sanitizeStorageValue = (key: string, value: unknown) => {
+  if (
+    (key === 'url' || key === 'downloadUrl')
+    && typeof value === 'string'
+    && /^(data:|blob:)/i.test(value)
+  ) {
+    return '';
+  }
+
+  return value;
+};
+
+const setLocalStorageState = (key: string, payload: unknown) => {
+  if (!canUseLocalStorage()) return;
+
+  try {
+    window.localStorage.setItem(key, JSON.stringify(payload, sanitizeStorageValue));
+  } catch (error) {
+    console.warn(`Failed to persist ${key}.`, error);
+  }
+};
+
 const cloneChannelList = (channels: any[]) => (
   Array.isArray(channels) ? channels.map((channel) => withChannelDefaults(channel)) : []
 );
+
+const buildChannelIdentityKeys = (channel: any = {}) => (
+  (['id', 'channelId', 'channelName'] as const).reduce<string[]>((keys, field) => {
+    const value = String(channel?.[field] ?? '').trim().toLowerCase();
+    if (value) {
+      keys.push(`${field}:${value}`);
+    }
+    return keys;
+  }, [])
+);
+
+const initialChannelIdentityKeys = new Set(
+  initialChannels.flatMap((channel) => buildChannelIdentityKeys(channel)),
+);
+
+const isInitialChannel = (channel: any = {}) => (
+  buildChannelIdentityKeys(channel).some((key) => initialChannelIdentityKeys.has(key))
+);
+
+const sanitizeStoredChannelList = (channels: unknown, fallbackChannelList: any[] = []) => (
+  Array.isArray(channels)
+    ? channels.reduce<any[]>((result, item) => {
+        if (!item || typeof item !== 'object') return result;
+        result.push(withChannelDefaults(item));
+        return result;
+      }, [])
+    : fallbackChannelList
+);
+
+const buildMigratedChannelList = (storedChannels: unknown, fallbackChannelList: any[]) => {
+  const userCreatedChannels = sanitizeStoredChannelList(storedChannels)
+    .filter((channel) => !isInitialChannel(channel));
+
+  return [...userCreatedChannels, ...fallbackChannelList];
+};
+
+const resolvePersistedCurrentUserId = (value: unknown, fallback = DEFAULT_CURRENT_USER_ID) => {
+  const userId = String(value || '').trim();
+  return APP_USERS.some((user) => user.id === userId) ? userId : fallback;
+};
+
+const hasFundSubmissionTrace = (approval: any = {}) => (
+  Boolean(String(approval?.submittedAt || '').trim())
+  || Boolean(String(approval?.submittedBy || '').trim())
+  || Boolean(String(approval?.lastActionAt || '').trim())
+  || Boolean(String(approval?.lastActionBy || '').trim())
+  || ['approved', 'changes_requested'].includes(String(approval?.status || '').trim().toLowerCase())
+  || (Array.isArray(approval?.history) && approval.history.length > 0)
+);
+
+const hasStaleFundMockData = (channels: unknown) => {
+  if (!Array.isArray(channels)) return false;
+  const channelByName = new Map(channels.map((channel: any) => [String(channel?.channelName || '').trim(), channel]));
+  const stripe = channelByName.get('Stripe Global');
+  const worldpay = channelByName.get('Worldpay EMEA');
+  const nuvei = channelByName.get('Nuvei Canada');
+  const stripePricing = Array.isArray(stripe?.pricingProposals)
+    ? stripe.pricingProposals.find((proposal: any) => proposal?.id === 'proposal-stripe-emea-cards')
+    : null;
+  const worldpayLaunchStatus = String(worldpay?.launchApproval?.status || '').trim();
+  const hasLegacyWorldpayFundTrace = (
+    Boolean(worldpay)
+    && hasFundSubmissionTrace(worldpay?.fundApproval)
+    && (!worldpayLaunchStatus || worldpayLaunchStatus === 'not_submitted')
+  );
+
+  return (
+    !nuvei
+    || Boolean(stripe && !stripePricing)
+    || hasLegacyWorldpayFundTrace
+  );
+};
 
 const buildFallbackViewId = (mode: DashboardViewMode, index: number) => (
   `${mode}-view-${Date.now()}-${index}`
@@ -84,6 +193,7 @@ const sanitizeStoredFilterConditions = (value: unknown): DashboardViewFilterCond
     const id = String(candidate.id ?? '').trim() || `filter-${Date.now()}-${index}`;
     const fieldKey = DASHBOARD_FIELD_KEY_MIGRATION_MAP[String(candidate.fieldKey ?? '').trim()]
       || String(candidate.fieldKey ?? '').trim();
+    if (fieldKey === 'complianceStatus') return filters;
     const rawValue = candidate.value;
 
     filters.push({
@@ -103,6 +213,15 @@ const sanitizeStoredColumns = (value: unknown, validColumns: string[]) => {
   return value.reduce<string[]>((columns, item) => {
     const normalized = DASHBOARD_FIELD_KEY_MIGRATION_MAP[String(item ?? '').trim()]
       || String(item ?? '').trim();
+    if (normalized === 'complianceStatus') {
+      ['wooshpayOnboardingStatus', 'corridorOnboardingStatus'].forEach((columnKey) => {
+        if (validColumns.includes(columnKey) && !columns.includes(columnKey)) {
+          columns.push(columnKey);
+        }
+      });
+      return columns;
+    }
+
     if (!normalized || !validColumns.includes(normalized) || columns.includes(normalized)) {
       return columns;
     }
@@ -110,6 +229,29 @@ const sanitizeStoredColumns = (value: unknown, validColumns: string[]) => {
     columns.push(normalized);
     return columns;
   }, []);
+};
+
+const CORRIDOR_PRESET_VIEW_IDS_REQUIRING_STATUS = new Set(['all-fields', 'fibd', 'manager']);
+
+const ensureCorridorPresetStatusColumn = (
+  mode: DashboardViewMode,
+  viewId: string,
+  columns: string[],
+  validColumns: string[],
+) => {
+  if (
+    mode !== 'corridor'
+    || !CORRIDOR_PRESET_VIEW_IDS_REQUIRING_STATUS.has(viewId)
+    || !validColumns.includes('status')
+    || columns.includes('status')
+  ) {
+    return columns;
+  }
+
+  const nextColumns = [...columns];
+  const channelNameIndex = nextColumns.indexOf('channelName');
+  nextColumns.splice(channelNameIndex >= 0 ? channelNameIndex + 1 : 0, 0, 'status');
+  return nextColumns;
 };
 
 const normalizeOrderedItems = <T extends { order: number }>(items: T[]) => (
@@ -177,7 +319,9 @@ const sanitizeStoredFieldSchema = (
       const fallbackField = fallbackSystemFieldMap.get(key);
       if (kind === 'system' && !fallbackField) return;
 
-      const label = String(rawField.label ?? fallbackField?.label ?? '').trim();
+      const label = kind === 'system'
+        ? String(fallbackField?.label ?? '').trim()
+        : String(rawField.label ?? fallbackField?.label ?? '').trim();
       if (!label) return;
 
       const sourceKey = DASHBOARD_FIELD_KEY_MIGRATION_MAP[String(rawField.sourceKey ?? fallbackField?.sourceKey ?? key).trim()]
@@ -227,10 +371,15 @@ const sanitizeStoredViews = (
 
     const candidate = item as Record<string, unknown>;
     const name = String(candidate.name ?? '').trim();
-    const columns = sanitizeStoredColumns(candidate.columns, validColumns);
+    const rawId = String(candidate.id ?? '').trim() || buildFallbackViewId(mode, index);
+    const columns = ensureCorridorPresetStatusColumn(
+      mode,
+      rawId,
+      sanitizeStoredColumns(candidate.columns, validColumns),
+      validColumns,
+    );
     if (!name || !columns.length) return views;
 
-    const rawId = String(candidate.id ?? '').trim() || buildFallbackViewId(mode, index);
     if (seenIds.has(rawId)) return views;
     seenIds.add(rawId);
 
@@ -330,6 +479,7 @@ const hydrateDashboardSavedViewsState = () => {
 };
 
 const hydrateChannelDataState = () => {
+  const fallbackCurrentUserId = DEFAULT_CURRENT_USER_ID;
   const fallbackChannelList = cloneChannelList(initialChannels);
   const fallbackGlobalPricingRuleCardCatalog = buildGlobalPricingRuleCardCatalog(fallbackChannelList);
   const fallbackKycHubDraftMap = {};
@@ -343,9 +493,11 @@ const hydrateChannelDataState = () => {
     owner: 'all',
   };
   const fallbackKycQueueScrollTop = 0;
+  const fallbackLegalQueuePreferredDocType: LegalQueueDocType = 'NDA';
 
   if (!canUseLocalStorage()) {
     return {
+      currentUserId: fallbackCurrentUserId,
       channelList: fallbackChannelList,
       selectedChannel: null,
       globalPricingRuleCardCatalog: fallbackGlobalPricingRuleCardCatalog,
@@ -356,6 +508,7 @@ const hydrateChannelDataState = () => {
       kycQueueTab: fallbackKycQueueTab,
       kycQueueFilters: fallbackKycQueueFilters,
       kycQueueScrollTop: fallbackKycQueueScrollTop,
+      legalQueuePreferredDocType: fallbackLegalQueuePreferredDocType,
     };
   }
 
@@ -363,6 +516,7 @@ const hydrateChannelDataState = () => {
     const rawState = window.localStorage.getItem(CHANNEL_DATA_STORAGE_KEY);
     if (!rawState) {
       return {
+        currentUserId: fallbackCurrentUserId,
         channelList: fallbackChannelList,
         selectedChannel: null,
         globalPricingRuleCardCatalog: fallbackGlobalPricingRuleCardCatalog,
@@ -373,17 +527,44 @@ const hydrateChannelDataState = () => {
         kycQueueTab: fallbackKycQueueTab,
         kycQueueFilters: fallbackKycQueueFilters,
         kycQueueScrollTop: fallbackKycQueueScrollTop,
+        legalQueuePreferredDocType: fallbackLegalQueuePreferredDocType,
       };
     }
 
     const parsedState = JSON.parse(rawState) as PersistedChannelDataState;
-    const storedChannelList = Array.isArray(parsedState?.channelList)
-      ? parsedState.channelList.reduce<any[]>((channels, item) => {
-          if (!item || typeof item !== 'object') return channels;
-          channels.push(withChannelDefaults(item));
-          return channels;
-        }, [])
-      : fallbackChannelList;
+    if (
+      Number(parsedState?.storageVersion) !== CHANNEL_DATA_STORAGE_VERSION
+      || hasStaleFundMockData(parsedState?.channelList)
+    ) {
+      const currentUserId = resolvePersistedCurrentUserId(parsedState?.currentUserId, fallbackCurrentUserId);
+      const migratedChannelList = buildMigratedChannelList(parsedState?.channelList, fallbackChannelList);
+      const storedSelectedChannelId = parsedState?.selectedChannelId;
+      const selectedChannel = migratedChannelList.find((channel) => (
+        storedSelectedChannelId !== undefined
+        && storedSelectedChannelId !== null
+        && String(channel.id) === String(storedSelectedChannelId)
+      )) || null;
+      const globalPricingRuleCardCatalog = buildGlobalPricingRuleCardCatalog(
+        migratedChannelList,
+        Array.isArray(parsedState?.globalPricingRuleCardCatalog) ? parsedState.globalPricingRuleCardCatalog : [],
+      );
+
+      return {
+        currentUserId,
+        channelList: migratedChannelList,
+        selectedChannel,
+        globalPricingRuleCardCatalog,
+        kycHubDraftMap: fallbackKycHubDraftMap,
+        kycHubTrack: fallbackKycHubTrack,
+        kycHubPerspective: fallbackKycHubPerspective,
+        kycHubReturnView: fallbackKycHubReturnView,
+        kycQueueTab: fallbackKycQueueTab,
+        kycQueueFilters: fallbackKycQueueFilters,
+        kycQueueScrollTop: fallbackKycQueueScrollTop,
+        legalQueuePreferredDocType: fallbackLegalQueuePreferredDocType,
+      };
+    }
+    const storedChannelList = sanitizeStoredChannelList(parsedState?.channelList, fallbackChannelList);
     const storedSelectedChannelId = parsedState?.selectedChannelId;
     const selectedChannel = storedChannelList.find((channel) => (
       storedSelectedChannelId !== undefined
@@ -394,8 +575,10 @@ const hydrateChannelDataState = () => {
       storedChannelList,
       Array.isArray(parsedState?.globalPricingRuleCardCatalog) ? parsedState.globalPricingRuleCardCatalog : [],
     );
+    const currentUserId = resolvePersistedCurrentUserId(parsedState?.currentUserId, fallbackCurrentUserId);
 
     return {
+      currentUserId,
       channelList: storedChannelList,
       selectedChannel,
       globalPricingRuleCardCatalog,
@@ -428,9 +611,17 @@ const hydrateChannelDataState = () => {
       kycQueueScrollTop: Number.isFinite(Number(parsedState?.kycQueueScrollTop))
         ? Number(parsedState?.kycQueueScrollTop)
         : fallbackKycQueueScrollTop,
+      legalQueuePreferredDocType: parsedState?.legalQueuePreferredDocType === 'MSA'
+        ? 'MSA'
+        : parsedState?.legalQueuePreferredDocType === 'PRICING'
+          ? 'PRICING'
+          : parsedState?.legalQueuePreferredDocType === 'OTHER_ATTACHMENTS'
+            ? 'OTHER_ATTACHMENTS'
+            : fallbackLegalQueuePreferredDocType,
     };
   } catch {
     return {
+      currentUserId: fallbackCurrentUserId,
       channelList: fallbackChannelList,
       selectedChannel: null,
       globalPricingRuleCardCatalog: fallbackGlobalPricingRuleCardCatalog,
@@ -441,6 +632,7 @@ const hydrateChannelDataState = () => {
       kycQueueTab: fallbackKycQueueTab,
       kycQueueFilters: fallbackKycQueueFilters,
       kycQueueScrollTop: fallbackKycQueueScrollTop,
+      legalQueuePreferredDocType: fallbackLegalQueuePreferredDocType,
     };
   }
 };
@@ -448,8 +640,23 @@ const hydrateChannelDataState = () => {
 export const useAppStore = defineStore('app', () => {
   const hydratedSavedViewsState = hydrateDashboardSavedViewsState();
   const hydratedChannelDataState = hydrateChannelDataState();
-  const role = ref('FI');
+  const users = ref<AppUser[]>(APP_USERS.map((user) => ({ ...user })));
+  const currentUserId = ref(String(hydratedChannelDataState.currentUserId || DEFAULT_CURRENT_USER_ID));
+  const currentUser = computed(() => (
+    users.value.find((user) => user.id === currentUserId.value) || users.value[0] || null
+  ));
+  const currentUserRole = computed<AppUserRole>(() => currentUser.value?.role || 'FIOP');
+  const role = computed(() => {
+    if (currentUserRole.value === 'FI_SUPERVISOR') return 'FI Supervisor';
+    if (currentUserRole.value === 'FIOP' || currentUserRole.value === 'FIBD') return 'FI';
+    if (currentUserRole.value === 'COMPLIANCE') return 'Compliance';
+    if (currentUserRole.value === 'LEGAL') return 'Legal';
+    if (currentUserRole.value === 'TECH') return 'Tech';
+    return 'Fund';
+  });
+  const currentUserName = computed(() => currentUser.value?.name || 'Current User');
   const view = ref('dashboard');
+  const fundViews = ['fundWorkspace', 'fundDetail'];
   const selectedChannel = ref<any>(hydratedChannelDataState.selectedChannel);
   const channelList = ref<any[]>(hydratedChannelDataState.channelList);
   const globalPaymentMethodCatalog = ref<string[]>(buildGlobalPaymentMethodCatalog(hydratedChannelDataState.channelList));
@@ -469,16 +676,257 @@ export const useAppStore = defineStore('app', () => {
   const kycHubPerspective = ref<'submit' | 'review'>(hydratedChannelDataState.kycHubPerspective as 'submit' | 'review');
   const kycHubReturnView = ref(String(hydratedChannelDataState.kycHubReturnView || 'detail'));
   const legalDetailReturnView = ref('detail');
+  const fundSubmitReturnView = ref('detail');
+  const pricingReturnView = ref('detail');
+  const pricingApprovalReturnView = ref('pricingApprovalWorkspace');
+  const pricingEntryMode = ref<PricingEntryMode>('default');
+  const detailEntryMode = ref<DetailEntryMode>('default');
+  const detailReturnView = ref('dashboard');
+  const legalDetailActiveTab = ref<LegalDetailTab>('nda');
+  const legalQueuePreferredDocType = ref<LegalQueueDocType>(
+    hydratedChannelDataState.legalQueuePreferredDocType as LegalQueueDocType || 'NDA',
+  );
   const selectedPricingProposalId = ref<string | null>(null);
+  const selectedPricingMethodId = ref<string | null>(null);
   const kycHubDraftMap = ref<Record<string, any>>(hydratedChannelDataState.kycHubDraftMap);
   const kycQueueTab = ref<KycQueueTab>(hydratedChannelDataState.kycQueueTab as KycQueueTab);
   const kycQueueFilters = ref<KycQueueFilters>(hydratedChannelDataState.kycQueueFilters as KycQueueFilters);
   const kycQueueScrollTop = ref(Number(hydratedChannelDataState.kycQueueScrollTop || 0));
+  const visibleChannels = computed(() => {
+    if (!currentUser.value) return [];
+    if (currentUserRole.value === 'FI_SUPERVISOR') return channelList.value;
+    if (currentUserRole.value === 'FIOP' || currentUserRole.value === 'FIBD') {
+      return channelList.value.filter((channel) => getChannelAssignmentUserIds(channel).includes(currentUserId.value));
+    }
+    return channelList.value;
+  });
   const normalizeGlobalPricingRuleCardCatalog = () => {
     globalPricingRuleCardCatalog.value = buildGlobalPricingRuleCardCatalog(
       channelList.value,
       globalPricingRuleCardCatalog.value.map((item: any) => normalizePricingRuleCardCatalogItem(item)).filter(Boolean),
     );
+  };
+  const buildChannelDataStoragePayload = () => ({
+    storageVersion: CHANNEL_DATA_STORAGE_VERSION,
+    currentUserId: currentUserId.value,
+    channelList: cloneChannelList(channelList.value),
+    selectedChannelId: selectedChannel.value?.id ?? null,
+    globalPricingRuleCardCatalog: globalPricingRuleCardCatalog.value
+      .map((item: any) => normalizePricingRuleCardCatalogItem(item))
+      .filter(Boolean),
+    kycHubDraftMap: { ...kycHubDraftMap.value },
+    kycHubTrack: kycHubTrack.value,
+    kycHubPerspective: kycHubPerspective.value,
+    kycHubReturnView: kycHubReturnView.value,
+    kycQueueTab: kycQueueTab.value,
+    kycQueueFilters: { ...kycQueueFilters.value },
+    kycQueueScrollTop: kycQueueScrollTop.value,
+    legalQueuePreferredDocType: legalQueuePreferredDocType.value,
+  });
+  const persistChannelDataState = () => {
+    setLocalStorageState(CHANNEL_DATA_STORAGE_KEY, buildChannelDataStoragePayload());
+  };
+  const resolveWorkflowActorRole = (user: AppUser | null = currentUser.value): WorkflowRole | null => {
+    if (!user) return null;
+    if (user.role === 'FIOP' || user.role === 'FIBD') return 'FIOP';
+    if (user.role === 'COMPLIANCE') return 'Compliance';
+    if (user.role === 'LEGAL') return 'Legal';
+    if (user.role === 'FI_SUPERVISOR') return 'FI Supervisor';
+    return null;
+  };
+  const canCreateChannel = () => (
+    currentUserRole.value === 'FI_SUPERVISOR'
+    || currentUserRole.value === 'FIOP'
+    || currentUserRole.value === 'FIBD'
+  );
+  const canManageAssignments = (_channel?: any) => currentUserRole.value === 'FI_SUPERVISOR';
+  const canAccessChannel = (channel: any) => {
+    if (!channel || !currentUser.value) return false;
+    if (currentUserRole.value === 'FI_SUPERVISOR') return true;
+    if (currentUserRole.value === 'FIOP' || currentUserRole.value === 'FIBD') {
+      return getChannelAssignmentUserIds(channel).includes(currentUserId.value);
+    }
+    return true;
+  };
+  const canOperateFiWork = (channel: any) => {
+    if (!channel || !currentUser.value) return false;
+    return (
+      currentUserRole.value === 'FI_SUPERVISOR'
+      || ((currentUserRole.value === 'FIOP' || currentUserRole.value === 'FIBD') && canAccessChannel(channel))
+    );
+  };
+  const openLegalApprovalWorkspace = (preferredDocType?: LegalQueueDocType | null) => {
+    legalQueuePreferredDocType.value = preferredDocType || legalQueuePreferredDocType.value || 'NDA';
+    selectedPricingProposalId.value = null;
+    selectedPricingMethodId.value = null;
+    view.value = 'legalApprovalWorkspace';
+  };
+  const resetPageContext = () => {
+    selectedChannel.value = null;
+    selectedPricingProposalId.value = null;
+    selectedPricingMethodId.value = null;
+    techStepsData.value = createTechStepsData('notStarted');
+    legalDetailReturnView.value = 'detail';
+    fundSubmitReturnView.value = 'detail';
+    pricingReturnView.value = 'detail';
+    pricingApprovalReturnView.value = 'pricingApprovalWorkspace';
+    pricingEntryMode.value = 'default';
+    detailEntryMode.value = 'default';
+    detailReturnView.value = 'dashboard';
+    legalDetailActiveTab.value = 'nda';
+    kycHubReturnView.value = 'detail';
+    kycHubPerspective.value = 'submit';
+  };
+  const resetToRoleHome = (targetRole: AppUserRole) => {
+    resetPageContext();
+
+    if (targetRole === 'LEGAL') {
+      view.value = 'legalApprovalWorkspace';
+      return;
+    }
+
+    if (targetRole === 'FUND') {
+      view.value = 'fundWorkspace';
+      return;
+    }
+
+    view.value = 'dashboard';
+  };
+  const syncViewAccess = () => {
+    if (selectedChannel.value && !canAccessChannel(selectedChannel.value)) {
+      selectedChannel.value = null;
+      selectedPricingProposalId.value = null;
+      selectedPricingMethodId.value = null;
+      legalDetailActiveTab.value = 'nda';
+      techStepsData.value = createTechStepsData('notStarted');
+    }
+
+    if (currentUserRole.value === 'FUND') {
+      const isFundPricingScoped = (
+        view.value === 'pricing'
+        && (pricingEntryMode.value === 'fundProposalScoped' || pricingEntryMode.value === 'fundMethodScoped')
+        && Boolean(selectedChannel.value)
+        && Boolean(selectedPricingProposalId.value)
+        && (
+          pricingEntryMode.value !== 'fundMethodScoped'
+          || Boolean(selectedPricingMethodId.value)
+        )
+      );
+
+      if (isFundPricingScoped) {
+        return;
+      }
+
+      selectedPricingProposalId.value = null;
+      selectedPricingMethodId.value = null;
+      if (view.value === 'fundDetail' && !selectedChannel.value) {
+        view.value = 'fundWorkspace';
+        return;
+      }
+      if (!fundViews.includes(view.value)) {
+        view.value = 'fundWorkspace';
+      }
+      return;
+    }
+
+    if (fundViews.includes(view.value)) {
+      selectedPricingProposalId.value = null;
+      selectedPricingMethodId.value = null;
+      view.value = 'dashboard';
+      return;
+    }
+
+    if (view.value === 'pricingApprovalDetail' && currentUserRole.value !== 'FI_SUPERVISOR') {
+      selectedPricingProposalId.value = null;
+      selectedPricingMethodId.value = null;
+      view.value = selectedChannel.value ? 'detail' : 'dashboard';
+      return;
+    }
+
+    if (view.value === 'pricingApprovalWorkspace' && currentUserRole.value !== 'FI_SUPERVISOR') {
+      selectedPricingProposalId.value = null;
+      selectedPricingMethodId.value = null;
+      view.value = selectedChannel.value ? 'detail' : 'dashboard';
+      return;
+    }
+
+    if (view.value === 'launchApprovalWorkspace' && currentUserRole.value !== 'FI_SUPERVISOR') {
+      selectedPricingProposalId.value = null;
+      selectedPricingMethodId.value = null;
+      view.value = selectedChannel.value ? 'detail' : 'dashboard';
+      return;
+    }
+
+    if (view.value === 'kycReviewDetail' && currentUserRole.value !== 'COMPLIANCE') {
+      view.value = 'dashboard';
+      return;
+    }
+
+    if (currentUserRole.value !== 'LEGAL' && view.value === 'legalDetail' && legalDetailActiveTab.value !== 'pricing') {
+      if (!selectedChannel.value) {
+        view.value = 'dashboard';
+      }
+    }
+
+    if (
+      ['detail', 'pricing', 'kycSubmit', 'legalDetail', 'ndaDetail', 'msaDetail', 'fundDetail', 'fundSubmit'].includes(view.value)
+      && !selectedChannel.value
+    ) {
+      selectedPricingProposalId.value = null;
+      selectedPricingMethodId.value = null;
+      view.value = 'dashboard';
+      return;
+    }
+
+    if (currentUserRole.value === 'COMPLIANCE') {
+      if (
+        view.value === 'kycSubmit'
+        || view.value === 'fundSubmit'
+        || view.value === 'detail'
+        || view.value === 'pricing'
+        || view.value === 'pricingApprovalWorkspace'
+        || view.value === 'pricingApprovalDetail'
+        || view.value === 'launchApprovalWorkspace'
+        || view.value === 'form'
+        || view.value === 'legalDetail'
+        || view.value === 'ndaDetail'
+        || view.value === 'msaDetail'
+      ) {
+        selectedPricingProposalId.value = null;
+        selectedPricingMethodId.value = null;
+        view.value = 'dashboard';
+      }
+      return;
+    }
+
+    if (
+      currentUserRole.value === 'LEGAL'
+      && (
+        view.value === 'kycSubmit'
+        || view.value === 'fundSubmit'
+        || view.value === 'kycReviewDetail'
+        || view.value === 'pricingApprovalWorkspace'
+        || view.value === 'pricingApprovalDetail'
+        || view.value === 'launchApprovalWorkspace'
+        || view.value === 'ndaDetail'
+        || view.value === 'msaDetail'
+      )
+    ) {
+      openLegalApprovalWorkspace();
+      return;
+    }
+
+    if (view.value === 'form' && !canCreateChannel()) {
+      view.value = selectedChannel.value ? 'detail' : 'dashboard';
+      return;
+    }
+
+    if (currentUserRole.value === 'TECH' && ['detail', 'pricing', 'form', 'kycSubmit', 'fundSubmit', 'kycReviewDetail', 'legalDetail', 'pricingApprovalWorkspace', 'pricingApprovalDetail', 'launchApprovalWorkspace'].includes(view.value)) {
+      selectedPricingProposalId.value = null;
+      selectedPricingMethodId.value = null;
+      view.value = 'dashboard';
+      return;
+    }
   };
   normalizeGlobalPricingRuleCardCatalog();
 
@@ -518,13 +966,14 @@ export const useAppStore = defineStore('app', () => {
         matrixFieldSchema: cloneDashboardFieldSchema(matrixFieldSchema.value),
       };
 
-      window.localStorage.setItem(DASHBOARD_VIEW_STATE_STORAGE_KEY, JSON.stringify(payload));
+      setLocalStorageState(DASHBOARD_VIEW_STATE_STORAGE_KEY, payload);
     },
     { deep: true },
   );
 
   watch(
     [
+      currentUserId,
       channelList,
       selectedChannel,
       globalPricingRuleCardCatalog,
@@ -535,103 +984,88 @@ export const useAppStore = defineStore('app', () => {
       kycQueueTab,
       kycQueueFilters,
       kycQueueScrollTop,
+      legalQueuePreferredDocType,
     ],
     () => {
-      if (!canUseLocalStorage()) return;
-
-      const payload = {
-        channelList: cloneChannelList(channelList.value),
-        selectedChannelId: selectedChannel.value?.id ?? null,
-        globalPricingRuleCardCatalog: globalPricingRuleCardCatalog.value
-          .map((item: any) => normalizePricingRuleCardCatalogItem(item))
-          .filter(Boolean),
-        kycHubDraftMap: { ...kycHubDraftMap.value },
-        kycHubTrack: kycHubTrack.value,
-        kycHubPerspective: kycHubPerspective.value,
-        kycHubReturnView: kycHubReturnView.value,
-        kycQueueTab: kycQueueTab.value,
-        kycQueueFilters: { ...kycQueueFilters.value },
-        kycQueueScrollTop: kycQueueScrollTop.value,
-      };
-
-      window.localStorage.setItem(CHANNEL_DATA_STORAGE_KEY, JSON.stringify(payload));
+      persistChannelDataState();
     },
     { deep: true },
   );
 
   // Actions
   const setRole = (newRole: string) => {
-    const previousRole = role.value;
-    role.value = newRole;
-
-    if (newRole === 'Compliance') {
-      if (
-        view.value === 'kycSubmit'
-        || view.value === 'detail'
-        || view.value === 'pricing'
-        || view.value === 'pricingApprovalDetail'
-        || view.value === 'form'
-        || view.value === 'ndaDetail'
-        || view.value === 'msaDetail'
-      ) {
-        selectedPricingProposalId.value = null;
-        view.value = 'dashboard';
+    const matchedUser = users.value.find((user) => {
+      if (!user.active) return false;
+      if (newRole === 'FI') return user.role === 'FIOP' || user.role === 'FIBD';
+      if (newRole === 'FI Supervisor') return user.role === 'FI_SUPERVISOR';
+      if (newRole === 'Compliance') return user.role === 'COMPLIANCE';
+      if (newRole === 'Legal') return user.role === 'LEGAL';
+      if (newRole === 'Tech') return user.role === 'TECH';
+      if (newRole === 'Fund') return user.role === 'FUND';
+      return false;
+    });
+    if (matchedUser) {
+      const isSameUser = currentUserId.value === matchedUser.id;
+      currentUserId.value = matchedUser.id;
+      if (!isSameUser) {
+        resetToRoleHome(matchedUser.role);
+        return;
       }
+      syncViewAccess();
+    }
+  };
+
+  const setCurrentUser = (userId: string) => {
+    const matchedUser = users.value.find((user) => user.id === userId && user.active);
+    if (!matchedUser) return;
+    const isSameUser = currentUserId.value === matchedUser.id;
+    currentUserId.value = matchedUser.id;
+    if (!isSameUser) {
+      resetToRoleHome(matchedUser.role);
       return;
     }
-
-    if (
-      newRole === 'Legal'
-      && (
-        view.value === 'kycSubmit'
-        || view.value === 'kycReviewDetail'
-        || view.value === 'pricingApprovalDetail'
-        || view.value === 'ndaDetail'
-        || view.value === 'msaDetail'
-      )
-    ) {
-      selectedPricingProposalId.value = null;
-      view.value = 'dashboard';
-      return;
-    }
-
-    if (newRole === 'FI Supervisor') {
-      selectedPricingProposalId.value = null;
-      if (view.value !== 'pricingApprovalDetail') {
-        view.value = 'dashboard';
-      }
-      return;
-    }
-
-    if (previousRole === 'Compliance' && view.value === 'kycReviewDetail') {
-      view.value = selectedChannel.value ? 'detail' : 'dashboard';
-      return;
-    }
-
-    if (previousRole === 'FI Supervisor' && view.value === 'pricingApprovalDetail') {
-      selectedPricingProposalId.value = null;
-      view.value = selectedChannel.value ? 'detail' : 'dashboard';
-    }
+    syncViewAccess();
   };
 
   const setView = (newView: string) => {
+    if (newView !== 'detail' && newView !== 'pricing') {
+      detailEntryMode.value = 'default';
+      detailReturnView.value = 'dashboard';
+    }
     view.value = newView;
+    syncViewAccess();
   };
 
   const setSelectedChannel = (channel: any) => {
+    detailEntryMode.value = 'default';
+    detailReturnView.value = 'dashboard';
     const matchedChannel = channel
       ? channelList.value.find((item) => item.id === channel.id) || channel
       : null;
     const nextChannel = matchedChannel ? withChannelDefaults(matchedChannel) : null;
+    if (nextChannel && !canAccessChannel(nextChannel)) {
+      selectedChannel.value = null;
+      selectedPricingProposalId.value = null;
+      selectedPricingMethodId.value = null;
+      legalDetailActiveTab.value = 'nda';
+      techStepsData.value = createTechStepsData('notStarted');
+      if (['detail', 'pricing', 'form', 'kycSubmit', 'legalDetail', 'ndaDetail', 'msaDetail', 'fundDetail', 'fundSubmit'].includes(view.value)) {
+        view.value = currentUserRole.value === 'FUND' ? 'fundWorkspace' : 'dashboard';
+      }
+      return;
+    }
     selectedChannel.value = nextChannel;
     if (!nextChannel) {
       selectedPricingProposalId.value = null;
+      selectedPricingMethodId.value = null;
+      legalDetailActiveTab.value = 'nda';
     }
     if (nextChannel) {
       techStepsData.value = nextChannel.techStepsData || createTechStepsData('notStarted');
     } else {
       techStepsData.value = createTechStepsData('notStarted');
     }
+    syncViewAccess();
   };
 
   const setChannelList = (list: any[]) => {
@@ -642,6 +1076,7 @@ export const useAppStore = defineStore('app', () => {
     }
     globalPaymentMethodCatalog.value = buildGlobalPaymentMethodCatalog(channelList.value);
     normalizeGlobalPricingRuleCardCatalog();
+    syncViewAccess();
   };
 
   const createChannel = (channel: any) => {
@@ -649,6 +1084,8 @@ export const useAppStore = defineStore('app', () => {
     channelList.value = [normalizedChannel, ...channelList.value];
     globalPaymentMethodCatalog.value = buildGlobalPaymentMethodCatalog(channelList.value);
     normalizeGlobalPricingRuleCardCatalog();
+    syncViewAccess();
+    persistChannelDataState();
     return normalizedChannel;
   };
 
@@ -665,6 +1102,42 @@ export const useAppStore = defineStore('app', () => {
     // Update catalogs if necessary
     globalPaymentMethodCatalog.value = buildGlobalPaymentMethodCatalog(channelList.value);
     normalizeGlobalPricingRuleCardCatalog();
+    syncViewAccess();
+  };
+
+  const updateChannelAssignment = (
+    channelId: string | number,
+    payload: Partial<ReturnType<typeof normalizeChannelAssignment>>,
+  ) => {
+    const channel = channelList.value.find((item) => String(item.id) === String(channelId));
+    if (!channel) return null;
+
+    const nextAssignment = normalizeChannelAssignment({
+      ...channel,
+      assignment: {
+        ...channel.assignment,
+        ...payload,
+      },
+    });
+    const timestamp = nextAssignment.updatedAt || channel.lastModifiedAt || '';
+    const actorName = currentUserName.value;
+    const updatedChannel = withChannelDefaults({
+      ...channel,
+      assignment: nextAssignment,
+      lastModifiedAt: timestamp || channel.lastModifiedAt,
+      auditLogs: [
+        {
+          time: timestamp || channel.lastModifiedAt || '',
+          user: actorName,
+          action: 'Updated channel assignments',
+          color: 'purple',
+        },
+        ...(channel.auditLogs || []),
+      ],
+    });
+
+    updateChannel(updatedChannel);
+    return updatedChannel;
   };
 
   const createPricingRuleCardId = () => `custom-card-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -714,7 +1187,7 @@ export const useAppStore = defineStore('app', () => {
   };
 
   const returnToDashboard = () => {
-    view.value = 'dashboard';
+    setView(currentUserRole.value === 'FUND' ? 'fundWorkspace' : 'dashboard');
   };
 
   const setKycHubTrack = (track: OnboardingTrack) => {
@@ -762,33 +1235,49 @@ export const useAppStore = defineStore('app', () => {
     kycHubTrack.value = options.track || 'wooshpay';
     kycHubPerspective.value = 'submit';
     kycHubReturnView.value = options.returnView || view.value || 'detail';
-    view.value = 'kycSubmit';
+    setView('kycSubmit');
   };
 
   const closeKycSubmit = () => {
     if (kycHubReturnView.value === 'detail' || kycHubReturnView.value === 'pricing') {
-      view.value = 'detail';
+      setView('detail');
       return;
     }
 
-    view.value = 'dashboard';
+    setView('dashboard');
   };
 
   const openLegalDetail = (
-    docType: 'NDA' | 'MSA',
+    docType: 'NDA' | 'MSA' | 'PRICING' | 'OTHER_ATTACHMENTS' = 'NDA',
     returnView = 'detail',
+    options: {
+      proposalId?: string | null;
+    } = {},
   ) => {
     legalDetailReturnView.value = returnView || view.value || 'detail';
-    view.value = docType === 'MSA' ? 'msaDetail' : 'ndaDetail';
+    legalDetailActiveTab.value = docType === 'MSA'
+      ? 'msa'
+      : docType === 'PRICING'
+        ? 'pricing'
+        : docType === 'OTHER_ATTACHMENTS'
+          ? 'otherAttachments'
+          : 'nda';
+    selectedPricingProposalId.value = legalDetailActiveTab.value === 'pricing'
+      ? Object.prototype.hasOwnProperty.call(options, 'proposalId')
+        ? options.proposalId || null
+        : selectedPricingProposalId.value
+      : null;
+    selectedPricingMethodId.value = null;
+    setView('legalDetail');
   };
 
   const closeLegalDetail = () => {
     if (legalDetailReturnView.value === 'detail' || legalDetailReturnView.value === 'pricing') {
-      view.value = legalDetailReturnView.value;
+      setView(legalDetailReturnView.value);
       return;
     }
 
-    view.value = 'dashboard';
+    setView('dashboard');
   };
 
   const openKycReviewDetail = (
@@ -802,24 +1291,175 @@ export const useAppStore = defineStore('app', () => {
     }
 
     kycHubTrack.value = options.track || 'wooshpay';
-    view.value = 'kycReviewDetail';
+    setView('kycReviewDetail');
   };
 
   const closeKycReviewDetail = () => {
-    view.value = 'dashboard';
+    setView('dashboard');
   };
 
-  const openPricingApprovalDetail = (channel: any, proposalId: string) => {
+  const openPricingApprovalWorkspace = () => {
+    pricingApprovalReturnView.value = 'pricingApprovalWorkspace';
+    pricingEntryMode.value = 'default';
+    selectedPricingProposalId.value = null;
+    selectedPricingMethodId.value = null;
+    setView('pricingApprovalWorkspace');
+  };
+
+  const openLaunchApprovalWorkspace = () => {
+    pricingEntryMode.value = 'default';
+    selectedPricingProposalId.value = null;
+    selectedPricingMethodId.value = null;
+    setView('launchApprovalWorkspace');
+  };
+
+  const openLaunchApprovalReadonlyDetail = (channel: any) => {
+    if (channel) {
+      setSelectedChannel(channel);
+    }
+    selectedPricingProposalId.value = null;
+    selectedPricingMethodId.value = null;
+    pricingEntryMode.value = 'default';
+    detailEntryMode.value = 'launchApprovalReadonly';
+    detailReturnView.value = 'launchApprovalWorkspace';
+    setView('detail');
+  };
+
+  const closeChannelDetail = () => {
+    const nextReturnView = detailReturnView.value || 'dashboard';
+    detailEntryMode.value = 'default';
+    detailReturnView.value = 'dashboard';
+    setView(nextReturnView);
+  };
+
+  const openPricingApprovalDetail = (
+    channel: any,
+    proposalId: string,
+    options: {
+      returnView?: string;
+    } = {},
+  ) => {
+    if (channel) {
+      setSelectedChannel(channel);
+    }
+    pricingEntryMode.value = 'default';
+    selectedPricingProposalId.value = proposalId || null;
+    selectedPricingMethodId.value = null;
+    pricingApprovalReturnView.value = options.returnView || view.value || 'pricingApprovalWorkspace';
+    setView('pricingApprovalDetail');
+  };
+
+  const closePricingApprovalDetail = () => {
+    pricingEntryMode.value = 'default';
+    selectedPricingProposalId.value = null;
+    selectedPricingMethodId.value = null;
+    setView(pricingApprovalReturnView.value || 'dashboard');
+  };
+
+  const openFundDetail = (channel: any) => {
+    if (channel) {
+      setSelectedChannel(channel);
+    }
+    selectedPricingProposalId.value = null;
+    selectedPricingMethodId.value = null;
+    pricingEntryMode.value = 'default';
+    setView('fundDetail');
+  };
+
+  const closeFundDetail = () => {
+    selectedPricingProposalId.value = null;
+    selectedPricingMethodId.value = null;
+    pricingEntryMode.value = 'default';
+    setView('fundWorkspace');
+  };
+
+  const openFundSubmit = (
+    channel: any,
+    options: {
+      returnView?: string;
+    } = {},
+  ) => {
+    if (channel) {
+      setSelectedChannel(channel);
+    }
+    selectedPricingProposalId.value = null;
+    selectedPricingMethodId.value = null;
+    pricingEntryMode.value = 'default';
+    fundSubmitReturnView.value = options.returnView || view.value || 'detail';
+    setView('fundSubmit');
+  };
+
+  const closeFundSubmit = () => {
+    selectedPricingProposalId.value = null;
+    selectedPricingMethodId.value = null;
+    pricingEntryMode.value = 'default';
+    setView(fundSubmitReturnView.value || 'detail');
+  };
+
+  const openFundPricingMethod = (
+    channel: any,
+    proposalId: string,
+    methodId: string,
+  ) => {
+    openFundPricingProposal(channel, proposalId, methodId);
+  };
+
+  const openFundPricingProposal = (
+    channel: any,
+    proposalId: string,
+    methodId?: string | null,
+    returnView = 'fundDetail',
+  ) => {
     if (channel) {
       setSelectedChannel(channel);
     }
     selectedPricingProposalId.value = proposalId || null;
-    view.value = 'pricingApprovalDetail';
+    selectedPricingMethodId.value = methodId || null;
+    pricingReturnView.value = returnView;
+    pricingEntryMode.value = 'fundProposalScoped';
+    setView('pricing');
   };
 
-  const closePricingApprovalDetail = () => {
-    selectedPricingProposalId.value = null;
-    view.value = 'dashboard';
+  const openPricingProposal = (
+    proposalId?: string | null,
+    options: {
+      returnView?: string;
+      entryMode?: PricingEntryMode;
+    } = {},
+  ) => {
+    selectedPricingProposalId.value = proposalId || null;
+    selectedPricingMethodId.value = null;
+    pricingReturnView.value = options.returnView || view.value || 'detail';
+    pricingEntryMode.value = options.entryMode || 'default';
+    setView('pricing');
+  };
+
+  const closePricingProposal = () => {
+    const nextReturnView = pricingReturnView.value || 'detail';
+    pricingEntryMode.value = 'default';
+    selectedPricingMethodId.value = null;
+
+    if (
+      nextReturnView !== 'pricingApprovalDetail'
+      && nextReturnView !== 'legalDetail'
+      && nextReturnView !== 'fundDetail'
+    ) {
+      selectedPricingProposalId.value = null;
+    }
+
+    if (
+      nextReturnView === 'detail'
+      || nextReturnView === 'legalDetail'
+      || nextReturnView === 'fundDetail'
+      || nextReturnView === 'fundSubmit'
+      || nextReturnView === 'pricingApprovalDetail'
+      || nextReturnView === 'dashboard'
+    ) {
+      setView(nextReturnView);
+      return;
+    }
+
+    setView('dashboard');
   };
 
   const openKycHub = (
@@ -872,12 +1512,19 @@ export const useAppStore = defineStore('app', () => {
   if (selectedChannel.value) {
     setSelectedChannel(selectedChannel.value);
   }
+  syncViewAccess();
 
   return {
+    users,
+    currentUserId,
+    currentUser,
+    currentUserRole,
+    currentUserName,
     role,
     view,
     selectedChannel,
     channelList,
+    visibleChannels,
     globalPaymentMethodCatalog,
     globalPricingRuleCardCatalog,
     corridorViews,
@@ -890,20 +1537,35 @@ export const useAppStore = defineStore('app', () => {
     dashboardRestoreNoticeToken,
     techStepsData,
     kycHubTrack,
-    kycHubPerspective,
-    kycHubReturnView,
-    legalDetailReturnView,
-    selectedPricingProposalId,
+      kycHubPerspective,
+      kycHubReturnView,
+      legalDetailReturnView,
+      pricingReturnView,
+      pricingApprovalReturnView,
+      pricingEntryMode,
+      detailEntryMode,
+      detailReturnView,
+      legalDetailActiveTab,
+      legalQueuePreferredDocType,
+      selectedPricingProposalId,
+      selectedPricingMethodId,
     kycHubDraftMap,
     kycQueueTab,
     kycQueueFilters,
     kycQueueScrollTop,
     setRole,
+    setCurrentUser,
     setView,
     setSelectedChannel,
     setChannelList,
     createChannel,
     updateChannel,
+    updateChannelAssignment,
+    canAccessChannel,
+    canOperateFiWork,
+    canCreateChannel,
+    canManageAssignments,
+    resolveWorkflowActorRole,
     upsertGlobalPricingRuleCard,
     renameGlobalPricingRuleCard,
     removeGlobalPricingRuleCard,
@@ -914,14 +1576,28 @@ export const useAppStore = defineStore('app', () => {
     setKycQueueFilters,
     resetKycQueueFilters,
     setKycQueueScrollTop,
-    openKycSubmit,
-    closeKycSubmit,
-    openLegalDetail,
+    resetToRoleHome,
+    openLegalApprovalWorkspace,
+      openKycSubmit,
+      closeKycSubmit,
+      openLegalDetail,
     closeLegalDetail,
     openKycReviewDetail,
     closeKycReviewDetail,
+    openPricingApprovalWorkspace,
+    openLaunchApprovalWorkspace,
+    openLaunchApprovalReadonlyDetail,
+    closeChannelDetail,
     openPricingApprovalDetail,
     closePricingApprovalDetail,
+    openFundDetail,
+    openFundSubmit,
+    openFundPricingProposal,
+    openFundPricingMethod,
+    closeFundDetail,
+    closeFundSubmit,
+    openPricingProposal,
+    closePricingProposal,
     openKycHub,
     closeKycHub,
     getKycHubDraft,

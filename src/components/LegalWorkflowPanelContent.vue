@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed } from 'vue';
 import { message } from 'ant-design-vue';
+import { INPUT_LIMITS, showTextLimitWarning } from '../constants/inputLimits';
 
 const props = defineProps<{
   channel: any;
@@ -65,6 +66,11 @@ const handleSubmit = () => {
     message.warning('Please provide context or remarks for the reviewers.');
     return;
   }
+  if (showTextLimitWarning(message.warning, [
+    { label: legalFormCopy.value.linkLabel, value: formState.documentLink, max: INPUT_LIMITS.url },
+    { label: legalFormCopy.value.remarksLabel, value: formState.remarks, max: INPUT_LIMITS.note },
+  ])) return;
+
   message.success(`${legalDocumentTitle.value} request sent to Legal Department`);
   emit('submit', { ...formState, docType: props.docType });
 };
@@ -133,7 +139,9 @@ const handleSubmit = () => {
               </template>
               <a-textarea
                 v-model:value="formState.documentLink"
+                :maxlength="INPUT_LIMITS.url"
                 :auto-size="{ minRows: 2, maxRows: 4 }"
+                show-count
                 :placeholder="legalFormCopy.linkPlaceholder"
                 class="legal-link-textarea"
               />
@@ -150,7 +158,9 @@ const handleSubmit = () => {
               </template>
               <a-textarea
                 v-model:value="formState.remarks"
+                :maxlength="INPUT_LIMITS.note"
                 :rows="4"
+                show-count
                 :placeholder="legalFormCopy.remarksPlaceholder"
                 class="legal-textarea"
               />
